@@ -71,6 +71,7 @@ class Client:
         finally:
             sock.close()
 
+
 # Client main entry point
 if __name__ == "__main__":
     client = Client()
