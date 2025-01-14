@@ -5,6 +5,9 @@ OFFER_MESSAGE_TYPE = 0x2
 REQUEST_MESSAGE_TYPE = 0x3
 PAYLOAD_MESSAGE_TYPE = 0x4
 
+DEFAULT_UDP_PORT = 13117
+DEFAULT_TCP_PORT = 12345
+
 
 def format_offer_message(udp_port, tcp_port):
     return struct.pack('!IBHH', MAGIC_COOKIE, OFFER_MESSAGE_TYPE, udp_port, tcp_port)
