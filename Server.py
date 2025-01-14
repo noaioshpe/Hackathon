@@ -18,8 +18,7 @@ class Server:
             self.running = True
             self._start_udp_broadcast()
             self._start_tcp_listener()
-            print(f"Server started successfully. Listening for TCP connections on port {self.tcp_port} "
-                  f"and broadcasting UDP offers on port {self.udp_port}.")
+            print(f"Server started, listening on IP address {socket.gethostbyname(socket.gethostname())}")
         except Exception as e:
             print(f"Error in start_server: {e}")
 
@@ -35,12 +34,11 @@ class Server:
 
     def _send_offers(self):
         try:
-            print("Broadcasting UDP offers...")
+            print("Sending offer announcements via UDP broadcast once every second.")
             offer_message = format_offer_message(self.udp_port, self.tcp_port)
             while self.running:
                 try:
                     self.udp_socket.sendto(offer_message, ('<broadcast>', self.udp_port))
-                    print("Sent UDP offer.")
                 except Exception as e:
                     print(f"Error sending UDP offer: {e}")
                 time.sleep(1)
@@ -63,7 +61,7 @@ class Server:
             while self.running:
                 print("Waiting for TCP connection...")
                 client_socket, addr = self.tcp_socket.accept()
-                print(f"Accepted TCP connection from {addr}.")
+                print(f"Accepted TCP connection from {addr[0]}.")
                 threading.Thread(target=self._handle_tcp_request, args=(client_socket,), daemon=True).start()
         except Exception as e:
             print(f"Error in _handle_tcp_connections: {e}")
@@ -87,7 +85,6 @@ class Server:
             print("Closed TCP connection.")
 
     def stop_server(self):
-        """Gracefully stop the server and release resources."""
         self.running = False
         if self.udp_socket:
             self.udp_socket.close()

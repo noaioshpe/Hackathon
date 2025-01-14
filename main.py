@@ -27,4 +27,6 @@ def main():
 
 
 if __name__ == "__main__":
+    print("Starting main function...")  # Debug print
     main()
+    print("Main function ended.")  # Debug print
