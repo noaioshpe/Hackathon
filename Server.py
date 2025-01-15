@@ -1,150 +1,192 @@
-import time
-import threading
 import socket
-import math
-from general import *
-
-# Configuration
-BROADCAST_INTERVAL_SECONDS: int = 1
-BROADCAST_TARGET_ADDRESS: Tuple[str, int] = ("255.255.255.255", BROADCAST_PORT)
-UDP_CHUNK_SIZE: int = 512
+import struct
+import threading
+import time
 
 
-def start_server():
-    server_ip = resolve_server_ip()
-    announce_server_start(server_ip)
+class Server:
+    def __init__(self):
+        self.udp_broadcast_port = 13117  # Port for broadcasting offers
+        self.tcp_port = None  # Will be assigned when server starts
+        self.udp_port = None  # Will be assigned when server starts
+        self.running = False
+        self.tcp_socket = None
+        self.udp_socket = None
 
-    # Launch server threads
-    threads = [
-        threading.Thread(target=broadcast_offers, args=(UDP_SERVER_PORT, TCP_SERVER_PORT)),
-        threading.Thread(target=setup_tcp_service, args=(server_ip, TCP_SERVER_PORT)),
-        threading.Thread(target=setup_udp_service, args=(server_ip, UDP_SERVER_PORT))
-    ]
-
-    for thread in threads:
-        thread.start()
-
-    for thread in threads:
-        thread.join()
-
-
-def resolve_server_ip() -> str:
-    """Retrieve the server's local IP address."""
-    return socket.gethostbyname(socket.gethostname())
-
-
-def announce_server_start(ip_address: str):
-    """Print a message indicating the server has started."""
-    print_in_color(f"Server started, listening on IP address {ip_address}", color=COLORS.BLUE)
-
-
-def broadcast_offers(udp_port: int, tcp_port: int):
-    """Broadcast periodic offer messages."""
-    message = prepare_offer_message(udp_port, tcp_port)
-    while True:
-        transmit_broadcast_message(message)
-        time.sleep(BROADCAST_INTERVAL_SECONDS)
-
-
-def prepare_offer_message(udp_port: int, tcp_port: int) -> bytes:
-    """Create the offer message to broadcast."""
-    return build_message(OFFER_MESSAGE_TYPE, udp_port, tcp_port)
-
-
-###readme
-def transmit_broadcast_message(message: bytes):
-    """Send a broadcast message over UDP."""
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
-        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    def start_server(self):
+        """Start the server and begin broadcasting offers"""
         try:
-            udp_socket.sendto(message, BROADCAST_TARGET_ADDRESS)
-            print_in_color("DBG: Broadcast offer sent.", color=COLORS.LIGHTYELLOW_EX)
+            # Initialize TCP socket
+            self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.tcp_socket.bind(('', 0))  # Bind to random available port
+            self.tcp_port = self.tcp_socket.getsockname()[1]
+            self.tcp_socket.listen(5)
+
+            # Initialize UDP socket
+            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp_socket.bind(('', 0))  # Bind to random available port
+            self.udp_port = self.udp_socket.getsockname()[1]
+
+            # Get server IP
+            hostname = socket.gethostname()
+            server_ip = socket.gethostbyname(hostname)
+            print(f"Server started, listening on IP address {server_ip}")
+
+            self.running = True
+
+            # Start broadcast thread
+            broadcast_thread = threading.Thread(target=self._broadcast_offers)
+            broadcast_thread.daemon = True
+            broadcast_thread.start()
+
+            # Start TCP listener thread
+            tcp_thread = threading.Thread(target=self._handle_tcp_connections)
+            tcp_thread.daemon = True
+            tcp_thread.start()
+
+            # Start UDP listener thread
+            udp_thread = threading.Thread(target=self._handle_udp_requests)
+            udp_thread.daemon = True
+            udp_thread.start()
+
+            # Keep main thread alive
+            while self.running:
+                time.sleep(1)
+
         except Exception as e:
-            print_error(f"Broadcast transmission error: {e}")
+            print(f"Error starting server: {e}")
+            self.stop_server()
 
+    def stop_server(self):
+        """Stop the server and clean up resources"""
+        self.running = False
+        if self.tcp_socket:
+            self.tcp_socket.close()
+        if self.udp_socket:
+            self.udp_socket.close()
 
-######################################################################
-def initialize_tcp_service(ip: str, port: int) -> None:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp_socket:
-            tcp_socket.bind((ip, port))
-            tcp_socket.listen(5)
-            print_in_color(f"DBG: TCP server listening on {ip}:{port}", color=COLORS.LIGHTYELLOW_EX)
+    def _broadcast_offers(self):
+        """Broadcast offer messages every second"""
+        broadcast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
-        while True:
+        while self.running:
             try:
-                client_socket, client_address = tcp_socket.accept()
-                print_in_color(f"DBG: Connection from {client_address}", color=COLORS.LIGHTYELLOW_EX)
-                threading.Thread(target=process_tcp_request, args=(client_socket,)).start()
+                # Create offer message
+                offer_message = struct.pack('!IbHH',
+                                            0xabcddcba,  # Magic cookie
+                                            0x2,  # Message type (offer)
+                                            self.udp_port,
+                                            self.tcp_port
+                                            )
+
+                # Broadcast offer
+                broadcast_socket.sendto(offer_message, ('<broadcast>', self.udp_broadcast_port))
+                time.sleep(1)
+
             except Exception as e:
-                print_error(f"Error in TCP server: {e}")
+                print(f"Error broadcasting offer: {e}")
 
+        broadcast_socket.close()
 
-##FIXME#####################
-def process_tcp_request(client_socket: socket.socket):
-    with client_socket:
+    def _handle_tcp_connections(self):
+        """Handle incoming TCP connections"""
+        while self.running:
+            try:
+                client_socket, addr = self.tcp_socket.accept()
+                client_thread = threading.Thread(
+                    target=self._handle_tcp_client,
+                    args=(client_socket, addr)
+                )
+                client_thread.daemon = True
+                client_thread.start()
+
+            except Exception as e:
+                if self.running:
+                    print(f"Error accepting TCP connection: {e}")
+
+    def _handle_tcp_client(self, client_socket, addr):
+        """Handle individual TCP client connection"""
         try:
-            message: bytes = client_socket.recv(BUFFER_SIZE)
-            if message[-1] != ord(TCP_MESSAGE_TERMINATOR):
-                raise ValueError("Message is too large or improperly terminated with '\\n'.")
+            # Receive file size request
+            data = client_socket.recv(1024).decode()
+            file_size = int(data.strip())
 
-            file_size = parse_request_message(message)
-            print_in_color(f"DBG: Received filesize of {file_size} bytes", color=COLORS.LIGHTYELLOW_EX)
+            # Send requested amount of data
+            bytes_sent = 0
+            chunk_size = 4096
 
-            response: bytes = b"a" * file_size
-            client_socket.sendall(response)
-            print_in_color(f"DBG: Sent response of length: {len(response)}", color=COLORS.LIGHTYELLOW_EX)
+            while bytes_sent < file_size:
+                remaining = file_size - bytes_sent
+                chunk = min(chunk_size, remaining)
+                data = b'0' * chunk  # Generate dummy data
+                client_socket.send(data)
+                bytes_sent += chunk
+
         except Exception as e:
-            print_error(f"Error processing TCP client request: {e}")
+            print(f"Error handling TCP client {addr}: {e}")
+        finally:
+            client_socket.close()
 
-
-def initialize_udp_service(server_ip: str, server_port: int) -> None:
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
-        udp_socket.bind((server_ip, server_port))
-        print_in_color(f"DBG: UDP server listening on {server_ip}:{server_port}", color=COLORS.LIGHTYELLOW_EX)
-
-        while True:
+    def _handle_udp_requests(self):
+        """Handle incoming UDP requests"""
+        while self.running:
             try:
-                message, client_address = udp_socket.recvfrom(BUFFER_SIZE)
-                print_in_color(f"DBG: Received message from {client_address}: {message}", color=COLORS.LIGHTYELLOW_EX)
+                data, addr = self.udp_socket.recvfrom(1024)
 
-                threading.Thread(
-                    target=handle_udp_client_request,
-                    args=(client_address, message)
-                ).start()
+                # Verify request format
+                if len(data) < 13:  # 4 (cookie) + 1 (type) + 8 (file size)
+                    continue
+
+                magic_cookie, msg_type, file_size = struct.unpack('!IbQ', data[:13])
+
+                if magic_cookie != 0xabcddcba or msg_type != 0x3:
+                    continue
+
+                # Handle request in new thread
+                client_thread = threading.Thread(
+                    target=self._handle_udp_client,
+                    args=(addr, file_size)
+                )
+                client_thread.daemon = True
+                client_thread.start()
+
             except Exception as e:
-                print_error(f"Error in UDP server: {e}")
+                if self.running:
+                    print(f"Error handling UDP request: {e}")
+
+    def _handle_udp_client(self, addr, file_size):
+        """Handle individual UDP client request"""
+        try:
+            segment_size = 1024
+            total_segments = (file_size + segment_size - 1) // segment_size
+
+            for segment_num in range(total_segments):
+                # Calculate size of current segment
+                current_size = min(segment_size, file_size - segment_num * segment_size)
+
+                # Create payload message
+                header = struct.pack('!IbQQ',
+                                     0xabcddcba,  # Magic cookie
+                                     0x4,  # Message type (payload)
+                                     total_segments,
+                                     segment_num
+                                     )
+
+                payload = b'0' * current_size
+                message = header + payload
+
+                # Send segment
+                self.udp_socket.sendto(message, addr)
+                time.sleep(0.001)  # Small delay to prevent network congestion
+
+        except Exception as e:
+            print(f"Error sending UDP data to {addr}: {e}")
 
 
-def handle_udp_client_request(client_address: Tuple[str, int], message: bytes) -> None:
+if __name__ == "__main__":
+    server = Server()
     try:
-        file_size: int = parse_request_message(message)
-        print_in_color(f"DBG: Handling UDP client {client_address}, received message: {message}", color=COLORS.LIGHTYELLOW_EX)
-        send_udp_file_segments(target_address=client_address, file_size=file_size, payload_size=DEFAULT_UDP_PAYLOAD_SIZE)
-    except Exception as e:
-        print_error(f"Error processing UDP client {client_address}: {e}")
-
-
-def send_udp_file_segments(target_address: Tuple[str, int], file_size: int, payload_size: int) -> None:
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
-        total_segments: int = math.ceil(file_size / payload_size)
-
-        for segment_number in range(total_segments):
-            bytes_sent = segment_number * payload_size
-            remaining_bytes = file_size - bytes_sent
-            current_payload_size = min(payload_size, remaining_bytes)
-            payload_data: bytes = b'a' * current_payload_size
-
-            payload_message: bytes = build_message(
-                PAYLOAD_MESSAGE_TYPE,
-                total_segments,
-                segment_number,
-                payload=payload_data
-            )
-
-            udp_socket.sendto(payload_message, target_address)
-            print_in_color(f"DBG: Sent segment {segment_number + 1}/{total_segments}, size: {current_payload_size} bytes", color=COLORS.LIGHTYELLOW_EX)
-
-
-if __name__ == '__main__':
-    start_server()
+        server.start_server()
+    except KeyboardInterrupt:
+        server.stop_server()
