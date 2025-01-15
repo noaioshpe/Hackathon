@@ -79,31 +79,33 @@ class Server:
             self.stop_server()
 
     def _broadcast_offer(self):
-        """Continuously broadcast server offer messages using non-blocking sockets."""
-        offer_socket = None
+        """
+        Continuously broadcast server offer messages using non-blocking sockets.
+        """
         try:
+            # Create a UDP socket for broadcasting
             offer_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             offer_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
+            # Prepare the offer message with server details
             offer_message = struct.pack('!IbHH',
                                         self.magic_cookie,
                                         self.msg_type_offer,
                                         self.udp_port,
                                         self.tcp_port)
 
-            print(f"Started broadcasting on port {self.offer_port}")
             while self.running:
                 try:
+                    # Send the offer message as a broadcast
                     offer_socket.sendto(offer_message, ('<broadcast>', self.offer_port))
-                    time.sleep(1)
+                    time.sleep(1)  # Wait before sending the next offer
                 except Exception as e:
                     print(f"\033[91mError broadcasting offer: {e}\033[0m")
 
         except Exception as e:
             print(f"\033[91mError in broadcast thread: {e}\033[0m")
         finally:
-            if offer_socket:
-                offer_socket.close()
+            offer_socket.close()  # Ensure the socket is closed
 
     def _handle_tcp_connections(self):
         """Handle incoming TCP connections"""
