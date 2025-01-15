@@ -12,25 +12,41 @@ class Server:
         self.running = False
         self.tcp_socket = None
         self.udp_socket = None
+        self.server_ip = None
+
+    def _get_ip_address(self):
+        """Get the server's IP address"""
+        try:
+            # Create a temporary socket to get the actual network interface IP
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return '127.0.0.1'
 
     def start_server(self):
         """Start the server and begin broadcasting offers"""
         try:
+            # Get server IP first
+            self.server_ip = self._get_ip_address()
+
             # Initialize TCP socket
             self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.tcp_socket.bind(('', 0))  # Bind to random available port
+            self.tcp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.tcp_socket.bind((self.server_ip, 0))  # Bind to actual IP
             self.tcp_port = self.tcp_socket.getsockname()[1]
             self.tcp_socket.listen(5)
 
             # Initialize UDP socket
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.udp_socket.bind(('', 0))  # Bind to random available port
+            self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.udp_socket.bind((self.server_ip, 0))
             self.udp_port = self.udp_socket.getsockname()[1]
 
-            # Get server IP
-            hostname = socket.gethostname()
-            server_ip = socket.gethostbyname(hostname)
-            print(f"Server started, listening on IP address {server_ip}")
+            print(f"Server started, listening on IP address {self.server_ip}")
+            print(f"TCP port: {self.tcp_port}, UDP port: {self.udp_port}")
 
             self.running = True
 
@@ -57,18 +73,14 @@ class Server:
             print(f"Error starting server: {e}")
             self.stop_server()
 
-    def stop_server(self):
-        """Stop the server and clean up resources"""
-        self.running = False
-        if self.tcp_socket:
-            self.tcp_socket.close()
-        if self.udp_socket:
-            self.udp_socket.close()
-
     def _broadcast_offers(self):
         """Broadcast offer messages every second"""
         broadcast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        print(f"Starting broadcast on port {self.udp_broadcast_port}")
+        print(f"Broadcasting UDP port: {self.udp_port}, TCP port: {self.tcp_port}")
 
         while self.running:
             try:
@@ -80,8 +92,14 @@ class Server:
                                             self.tcp_port
                                             )
 
-                # Broadcast offer
-                broadcast_socket.sendto(offer_message, ('<broadcast>', self.udp_broadcast_port))
+                # Try both broadcast addresses
+                broadcast_addrs = ['255.255.255.255', '<broadcast>']
+                for addr in broadcast_addrs:
+                    try:
+                        broadcast_socket.sendto(offer_message, (addr, self.udp_broadcast_port))
+                    except:
+                        continue
+
                 time.sleep(1)
 
             except Exception as e:
@@ -94,6 +112,7 @@ class Server:
         while self.running:
             try:
                 client_socket, addr = self.tcp_socket.accept()
+                print(f"Accepted TCP connection from {addr}")
                 client_thread = threading.Thread(
                     target=self._handle_tcp_client,
                     args=(client_socket, addr)
@@ -111,6 +130,7 @@ class Server:
             # Receive file size request
             data = client_socket.recv(1024).decode()
             file_size = int(data.strip())
+            print(f"TCP client {addr} requested {file_size} bytes")
 
             # Send requested amount of data
             bytes_sent = 0
@@ -123,6 +143,8 @@ class Server:
                 client_socket.send(data)
                 bytes_sent += chunk
 
+            print(f"TCP transfer completed for {addr}: {bytes_sent} bytes sent")
+
         except Exception as e:
             print(f"Error handling TCP client {addr}: {e}")
         finally:
@@ -133,6 +155,7 @@ class Server:
         while self.running:
             try:
                 data, addr = self.udp_socket.recvfrom(1024)
+                print(f"Received UDP request from {addr}")
 
                 # Verify request format
                 if len(data) < 13:  # 4 (cookie) + 1 (type) + 8 (file size)
@@ -142,6 +165,8 @@ class Server:
 
                 if magic_cookie != 0xabcddcba or msg_type != 0x3:
                     continue
+
+                print(f"Valid UDP request from {addr} for {file_size} bytes")
 
                 # Handle request in new thread
                 client_thread = threading.Thread(
@@ -160,6 +185,7 @@ class Server:
         try:
             segment_size = 1024
             total_segments = (file_size + segment_size - 1) // segment_size
+            print(f"Starting UDP transfer to {addr}: {total_segments} segments")
 
             for segment_num in range(total_segments):
                 # Calculate size of current segment
@@ -180,8 +206,19 @@ class Server:
                 self.udp_socket.sendto(message, addr)
                 time.sleep(0.001)  # Small delay to prevent network congestion
 
+            print(f"UDP transfer completed for {addr}: {total_segments} segments sent")
+
         except Exception as e:
             print(f"Error sending UDP data to {addr}: {e}")
+
+    def stop_server(self):
+        """Stop the server and clean up resources"""
+        print("Shutting down server...")
+        self.running = False
+        if self.tcp_socket:
+            self.tcp_socket.close()
+        if self.udp_socket:
+            self.udp_socket.close()
 
 
 if __name__ == "__main__":
