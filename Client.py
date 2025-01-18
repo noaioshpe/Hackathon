@@ -1,189 +1,243 @@
-import socket
-import threading
-import struct
-import time
-import statistics
-import select
-import queue
-import signal
 from enum import Enum
+import queue
+import select
+import signal
+import socket
+import statistics
+import struct
+import threading
+import time
 
 
 class ClientState(Enum):
     """Enumeration of possible client states."""
-    STARTUP = 1
-    LOOKING_FOR_SERVER = 2
-    SPEED_TEST = 3
+    INITIALIZATION = 1
+    SERVER_DISCOVERY = 2
+    PERFORMANCE_TEST = 3
 
 
-class SpeedTestClient:
+class Client:
+    # ANSI color codes
+    RED = '\033[91m'  # Errors and failures
+    GREEN = '\033[92m'  # Success messages
+    YELLOW = '\033[93m'  # Warnings and status
+    BLUE = '\033[94m'  # Information messages
+    MAGENTA = '\033[95m'  # Headers and titles
+    CYAN = '\033[96m'  # User input prompts
+    RESET = '\033[0m'  # Reset color
+
     """
     An improved client class that performs network speed tests using both TCP and UDP protocols.
     Includes enhanced connection handling and retry mechanisms.
     """
 
-    def __init__(self, listen_port=13117):
+    def __init__(self, discovery_port=13117):
         """
         Initialize the speed test client with improved configuration.
         Args:
             listen_port (int): Port to listen for server broadcasts (default: 13117)
         """
-        self.listen_port = listen_port
-        self.state = ClientState.STARTUP
-        self.magic_cookie = 0xabcddcba
-        self.running = True
-        self.message_queue = queue.Queue()
-        self.active_connections = 0
-        self.max_retries = 3
-        self.connection_lock = threading.Lock()
+        # Core settings
+        self.discovery_port = discovery_port
+        self.state = ClientState.INITIALIZATION
+        self.protocol_cookie = 0xabcddcba
+        self.is_running = True
 
-        # Enhanced statistics tracking
-        self.statistics = {
-            'tcp_times': [],
-            'udp_times': [],
-            'udp_packets_received': 0,
-            'udp_packets_lost': 0,
-            'tcp_connection_failures': 0,
-            'tcp_transfer_failures': 0,
-            'successful_connections': 0
+        # Thread management
+        self.command_queue = queue.Queue()
+        self.sync_lock = threading.Lock()
+        self.active_tests = 0
+        self.max_attempts = 3
+
+        self.performance_data = {
+            'tcp': {
+                'timings': [],  # Same as tcp_times
+                'failures': {
+                    'connections': 0,  # Same as tcp_connect_fails
+                    'transfers': 0  # Same as tcp_transfer_fails
+                },
+                'successes': 0  # Same as successful_tests
+            },
+            'udp': {
+                'timings': [],  # Same as udp_times
+                'packets': {
+                    'received': 0,  # Same as udp_received
+                    'lost': 0  # Same as udp_lost
+                }
+            }
         }
 
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
+        # Set up graceful shutdown handlers
+        signal.signal(signal.SIGINT, self._cleanup_handler)
+        signal.signal(signal.SIGTERM, self._cleanup_handler)
 
-    def _signal_handler(self, signum, frame):
+    def _cleanup_handler(self, signum, frame):
         """Handle system signals for graceful shutdown."""
-        print("\n\033[93mShutting down client...\033[0m")
-        self.running = False
+        print("\nShutting down client...")
+        self.is_running = False
 
     def start(self):
         """Start the speed test client with improved error handling."""
-        print("\033[95mStarting Speed Test Client\033[0m")
-        print("\033[95mPress Ctrl+C to exit\033[0m")
+        print(f"{self.MAGENTA}Starting Speed Test Client{self.RESET}")
+        print(f"{self.MAGENTA}Press Ctrl+C to exit{self.RESET}")
 
         while self.running:
             try:
                 self.file_size = self._get_file_size()
-                self.state = ClientState.LOOKING_FOR_SERVER
+                self.state = ClientState.SERVER_DISCOVERY
                 self._setup_udp_socket()
                 self._discover_server()
             except KeyboardInterrupt:
                 break
             except Exception as e:
-                print(f"\033[91mError in main loop: {e}\033[0m")
+                print(f"{self.RED}Error in main loop: {e}{self.RESET}")
                 time.sleep(1)
 
         self._cleanup()
 
     def _setup_udp_socket(self):
-        """Setup UDP socket with improved configuration."""
-        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8388608)  # 8MB receive buffer
-        self.udp_socket.bind(('', self.listen_port))
-        self.udp_socket.setblocking(False)
+        try:
+            """Setup UDP socket with improved configuration."""
+            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8388608)  # 8MB receive buffer
+            self.udp_socket.bind(('', self.discovery_port))
+            self.udp_socket.setblocking(False)
+        except Exception as e:
+            print(f"{self.RED}Error setting up UDP socket: {e}{self.RESET}")
+            raise
 
     def _get_file_size(self):
         """Get desired file size from user input with validation."""
         while True:
             try:
-                size = input("\033[96mEnter file size for speed test (in bytes): \033[0m")
-                size_value = int(size)
-                if size_value <= 0:
-                    print("\033[91mFile size must be positive\033[0m")
+                size = input(f"{self.CYAN}Enter file size for speed test (in bytes): {self.RESET}")
+                size_int = int(size)
+                if size_int <= 0:
+                    print(f"{self.RED}File size must be positive{self.RESET}")
                     continue
-                return size_value
+                return size_int
             except ValueError:
-                print("\033[91mPlease enter a valid number\033[0m")
+                print(f"{self.RED}Please enter a valid number{self.RESET}")
 
     def _discover_server(self):
         """Discover speed test servers with improved timeout handling."""
-        print("\033[93mLooking for speed test server...\033[0m")
+        print(f"{self.YELLOW}Looking for speed test server...{self.RESET}")
 
-        while self.running and self.state == ClientState.LOOKING_FOR_SERVER:
+        TIMEOUT_INTERVAL = 1.0
+        EXPECTED_MSG_SIZE = 9  # Magic(4) + Type(1) + UDP(2) + TCP(2)
+        SERVER_MSG_TYPE = 0x2
+
+        while self.running and self.state == ClientState.SERVER_DISCOVERY:
             try:
-                readable, _, _ = select.select([self.udp_socket], [], [], 1.0)
+                socket_ready, _, _ = select.select([self.udp_socket], [], [], TIMEOUT_INTERVAL)
 
-                if readable:
-                    data, addr = self.udp_socket.recvfrom(1024)
+                if socket_ready:
+                    server_message, server_address = self.udp_socket.recvfrom(1024)
 
-                    if len(data) == 9:
-                        magic_cookie, msg_type, udp_port, tcp_port = struct.unpack('!IbHH', data)
+                    if len(server_message) == EXPECTED_MSG_SIZE:
+                        # Unpack server broadcast message
+                        received_cookie, message_type, server_udp_port, server_tcp_port = \
+                            struct.unpack('!IbHH', server_message)
 
-                        if magic_cookie == self.magic_cookie and msg_type == 0x2:
-                            print(f"\033[92mReceived offer from {addr[0]}\033[0m")
-                            self.state = ClientState.SPEED_TEST
-                            self._run_speed_test(addr[0], udp_port, tcp_port)
+                        if received_cookie == self.protocol_cookie and message_type == SERVER_MSG_TYPE:
+                            print(f"{self.GREEN}Received offer from {server_address[0]}{self.RESET}")
+
+                            self.state = ClientState.PERFORMANCE_TEST
+
+                            self._run_speed_test(
+                                server_host=server_address[0],
+                                udp_port=server_udp_port,
+                                tcp_port=server_tcp_port
+                            )
                             break
 
             except Exception as e:
-                print(f"\033[91mError discovering server: {e}\033[0m")
+                print(f"{self.RED}Error discovering server: {e}{self.RESET}")
                 time.sleep(1)
 
-    def _run_tcp_test(self, server_host, server_port, transfer_num):
+    def _run_tcp_test(self, server_host, server_port, test_number):
         """
         Perform TCP speed test with improved error handling and retry mechanism.
         """
-        tcp_socket = None
-        retry_count = 0
 
-        while retry_count < self.max_retries and self.running:
+        SOCKET_TIMEOUT = 10.0
+        RECEIVE_BUFFER = 8388608  # 8MB buffer
+        MAX_CHUNK_SIZE = 65536  # 64KB chunks
+        RETRY_DELAY = 1.0  # 1 second between retries
+        READ_TIMEOUT = 5.0  # 5 seconds read timeout
+
+        tcp_socket = None
+        attempt_count = 0
+
+        while attempt_count < self.max_attempts and self.running:
             try:
                 tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                tcp_socket.settimeout(10.0)
-                tcp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8388608)
+                tcp_socket.settimeout(SOCKET_TIMEOUT)
+                tcp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, RECEIVE_BUFFER)
 
-                with self.connection_lock:
-                    self.active_connections += 1
+                with self.sync_lock:
+                    self.active_tests += 1
 
+                # Establish connection and send test parameters
                 tcp_socket.connect((server_host, server_port))
-                tcp_socket.send(f"{self.file_size}\n".encode())
+                test_request = f"{self.file_size}\n".encode()
+                tcp_socket.send(test_request)
 
-                start_time = time.time()
-                received = 0
+                # Start data transfer and timing
+                transfer_start = time.time()
+                bytes_received = 0
 
-                while received < self.file_size and self.running:
-                    readable, _, _ = select.select([tcp_socket], [], [], 5.0)
-                    if not readable:
-                        raise TimeoutError("TCP test timed out")
+                while bytes_received < self.file_size and self.running:
+                    ready_sockets, _, _ = select.select([tcp_socket], [], [], READ_TIMEOUT)
 
-                    chunk = tcp_socket.recv(min(65536, self.file_size - received))
-                    if not chunk:
+                    if not ready_sockets:
+                        raise TimeoutError("TCP data transfer timed out")
+
+                    remaining_bytes = self.file_size - bytes_received
+                    data_chunk = tcp_socket.recv(min(MAX_CHUNK_SIZE, remaining_bytes))
+
+                    if not data_chunk:
                         break
-                    received += len(chunk)
 
-                end_time = time.time()
-                transfer_time = end_time - start_time
+                    bytes_received += len(data_chunk)
 
-                if transfer_time > 0:
-                    speed = (self.file_size * 8) / transfer_time
-                    with self.connection_lock:
-                        self.statistics['tcp_times'].append(transfer_time)
-                        self.statistics['successful_connections'] += 1
-                    print(f"\033[92mTCP transfer #{transfer_num} finished:"
-                          f" Time: {transfer_time:.3f}s,"
-                          f" Speed: {speed:.2f} bits/second\033[0m")
+                transfer_duration = time.time() - transfer_start
+
+                if transfer_duration > 0:
+                    transfer_speed = (self.file_size * 8) / transfer_duration
+
+                    with self.sync_lock:
+                        self.performance_data['tcp']['timings'].append(transfer_duration)
+                        self.performance_data['tcp']['successes'] += 1
+
+                    print(f"{self.GREEN}TCP transfer #{test_number} finished:"
+                          f" Time: {transfer_duration:.3f}s,"
+                          f" Speed: {transfer_speed:.2f} bits/second{self.RESET}")
+#FIXME (maybe it should be in the line of the print)
                 break  # Success, exit retry loop
 
-            except (ConnectionRefusedError, TimeoutError) as e:
-                retry_count += 1
-                with self.connection_lock:
-                    self.statistics['tcp_connection_failures'] += 1
-                print(
-                    f"\033[93mTCP transfer #{transfer_num} failed (attempt {retry_count}/{self.max_retries}): {e}\033[0m")
-                time.sleep(1)  # Wait before retry
+            except (ConnectionRefusedError, TimeoutError) as conn_error:
+                attempt_count += 1
+                with self.sync_lock:
+                    self.performance_data['tcp']['failures']['connections'] += 1
+                print(f"{self.YELLOW}TCP transfer #{test_number} failed "
+                      f"(attempt {attempt_count}/{self.max_attempts}): {conn_error}{self.RESET}")
+                time.sleep(RETRY_DELAY)  # Wait before retry
 
-            except Exception as e:
-                with self.connection_lock:
-                    self.statistics['tcp_transfer_failures'] += 1
-                print(f"\033[91mTCP transfer #{transfer_num} error: {e}\033[0m")
+            except Exception as error:
+                with self.sync_lock:
+                    self.performance_data['tcp']['failures']['transfers'] += 1
+                print(f"{self.RED}TCP transfer #{test_number} error: {error}{self.RESET}")
                 break
 
             finally:
                 if tcp_socket:
                     tcp_socket.close()
-                with self.connection_lock:
-                    self.active_connections -= 1
+                with self.sync_lock:
+                    self.active_tests -= 1
+
+###############################################################
 
     def _run_udp_test(self, server_host, server_port, transfer_num):
         """
@@ -354,5 +408,5 @@ class SpeedTestClient:
 
 
 if __name__ == "__main__":
-    client = SpeedTestClient()
+    client = Client()
     client.start()
