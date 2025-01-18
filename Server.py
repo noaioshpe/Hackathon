@@ -1,11 +1,16 @@
-import socket
-import struct
-import threading
-import time
-import random
+import socket  # For network communication
+import threading  # For handling multiple clients simultaneously
+import struct  # For packing/unpacking binary data
+import time  # For timing operations
+import random  # For generating random port numbers
+import select  # For non-blocking I/O
+import signal  # For handling system signals
 
+class SpeedTestServer:
+    """
+    A server class that handles network speed testing using both TCP and UDP protocols.
+    """
 
-class Server:
     def __init__(self, host='', offer_port=13117):
         """
         Initialize the server with specified host and port.
@@ -20,63 +25,53 @@ class Server:
         self.running = False  # Flag to indicate whether the server is running
         self.magic_cookie = 0xabcddcba  # Unique identifier for valid packets
         self.msg_type_offer = 0x2  # Message type for server offer packets
-        self.msg_type_response = 0x3  # Message type for client response
-        self.msg_type_payload = 0x4  # Message type for data payload
-        self.server_ip = None
-        self.tcp_socket = None
-        self.udp_socket = None
 
-    def _get_ip_address(self):
-        """Get the server's IP address"""
+        # Register signal handlers for graceful shutdown
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+
+    def _signal_handler(self, signum, frame):
+        """
+        Handle system signals for graceful shutdown.
+        Args:
+            signum: Signal number
+            frame: Current stack frame
+        """
+        print("\n\033[93mShutting down server...\033[0m")  # Inform about shutdown
+        self.stop()  # Stop the server
+
+    def start(self):
+        """
+        Start the server and initialize all necessary sockets and threads.
+        """
+        self.running = True  # Set the running flag to True
+
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
-        except Exception:
-            return '127.0.0.1'
-
-    def start_server(self):
-        """Start the server and begin broadcasting offers"""
-        try:
-            # Get server IP
-            self.server_ip = self._get_ip_address()
-
-            # Initialize TCP socket
-            self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.tcp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.tcp_socket.bind((self.server_ip, self.tcp_port))
-            self.tcp_socket.listen(5)
-
-            # Initialize UDP socket
+            # Create and bind a UDP socket for speed test communication
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.udp_socket.bind((self.server_ip, self.udp_port))
+            self.udp_socket.bind((self.host, self.udp_port))
 
-            print(f"\nServer started, listening on IP address {self.server_ip}")
-            print(f"TCP port: {self.tcp_port}, UDP port: {self.udp_port}\n")
+            # Create and bind a TCP socket for speed test communication
+            self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.tcp_socket.bind((self.host, self.tcp_port))
+            self.tcp_socket.listen(5)  # Listen for incoming connections
 
-            self.running = True
+            # Start a thread to broadcast server offers
+            self.broadcast_thread = threading.Thread(target=self._broadcast_offer)
+            self.broadcast_thread.daemon = True  # Ensure thread exits with the program
+            self.broadcast_thread.start()
 
-            # Start threads
-            threads = [
-                threading.Thread(target=self._broadcast_offer),
-                threading.Thread(target=self._handle_tcp_connections),
-                threading.Thread(target=self._handle_udp_requests)
-            ]
+            # Get and print the server's IP address
+            server_ip = socket.gethostbyname(socket.gethostname())
+            print(f"\033[92mWonder Woman's - Server started, listening on IP address {server_ip}\033[0m")
+            print(f"\033[92mPort: {self.udp_port}, TCP Port: {self.tcp_port}\033[0m")
 
-            for thread in threads:
-                thread.daemon = True
-                thread.start()
-
-            # Keep main thread alive
-            while self.running:
-                time.sleep(1)
+            # Handle client requests
+            self._handle_requests()
 
         except Exception as e:
             print(f"\033[91mError starting server: {e}\033[0m")
-            self.stop_server()
+            self.stop()  # Stop the server on error
 
     def _broadcast_offer(self):
         """
@@ -107,130 +102,125 @@ class Server:
         finally:
             offer_socket.close()  # Ensure the socket is closed
 
-    def _handle_tcp_connections(self):
-        """Handle incoming TCP connections"""
-        while self.running:
-            try:
-                client_socket, addr = self.tcp_socket.accept()
-                client_socket.settimeout(5.0)  # 5 second timeout for operations
-                print(f"\033[94mAccepted TCP connection from {addr}\033[0m")
+    def _handle_requests(self):
+        """
+        Main loop for handling incoming client requests.
+        """
+        # Set sockets to non-blocking mode
+        self.udp_socket.setblocking(False)
+        self.tcp_socket.setblocking(False)
 
-                client_thread = threading.Thread(
-                    target=self._handle_tcp_client,
-                    args=(client_socket, addr)
-                )
-                client_thread.daemon = True
-                client_thread.start()
-
-            except Exception as e:
-                if self.running:
-                    print(f"\033[91mError accepting TCP connection: {e}\033[0m")
-
-    def _handle_tcp_client(self, client_socket, addr):
-        """Handle individual TCP client connection"""
-        try:
-            # Receive file size request
-            data = client_socket.recv(1024).decode().strip()
-            if not data:
-                raise Exception("No data received")
-
-            file_size = int(data)
-            print(f"\033[94mTCP client {addr} requested {file_size} bytes\033[0m")
-
-            # Send requested amount of data
-            bytes_sent = 0
-            chunk_size = 4096
-
-            while bytes_sent < file_size and self.running:
-                remaining = file_size - bytes_sent
-                chunk = min(chunk_size, remaining)
-                data = b'0' * chunk
-                client_socket.send(data)
-                bytes_sent += chunk
-
-            print(f"\033[92mTCP transfer completed for {addr}: {bytes_sent} bytes sent\033[0m")
-
-        except Exception as e:
-            print(f"\033[91mError handling TCP client {addr}: {e}\033[0m")
-        finally:
-            client_socket.close()
-
-    def _handle_udp_requests(self):
-        """Handle incoming UDP requests"""
-        self.udp_socket.settimeout(1.0)  # 1 second timeout for UDP operations
+        inputs = [self.udp_socket, self.tcp_socket]  # List of sockets to monitor
 
         while self.running:
             try:
-                data, addr = self.udp_socket.recvfrom(1024)
-                print(f"\033[94mReceived UDP request from {addr}\033[0m")
+                # Wait for socket activity
+                readable, _, exceptional = select.select(inputs, [], inputs, 1.0)
 
-                if len(data) < 13:  # Magic cookie (4) + type (1) + file size (8)
-                    continue
+                for sock in readable:
+                    if sock is self.udp_socket:
+                        try:
+                            # Handle incoming UDP data in a new thread
+                            data, addr = sock.recvfrom(1024)
+                            threading.Thread(target=self._handle_udp_speed_test, args=(data, addr)).start()
+                        except Exception as e:
+                            print(f"\033[91mError handling UDP request: {e}\033[0m")
 
-                magic_cookie, msg_type, file_size = struct.unpack('!IbQ', data[:13])
+                    elif sock is self.tcp_socket:
+                        try:
+                            # Accept a new TCP connection and handle it in a new thread
+                            client_socket, addr = sock.accept()
+                            threading.Thread(target=self._handle_tcp_client, args=(client_socket, addr)).start()
+                        except Exception as e:
+                            print(f"\033[91mError handling TCP connection: {e}\033[0m")
 
-                if magic_cookie != self.magic_cookie or msg_type != self.msg_type_response:
-                    continue
+                for sock in exceptional:
+                    print(f"\033[91mException condition on {sock.getsockname()}\033[0m")
+                    inputs.remove(sock)  # Remove the socket from the monitored list
+                    sock.close()  # Close the problematic socket
 
-                print(f"\033[94mValid UDP request from {addr} for {file_size} bytes\033[0m")
-
-                client_thread = threading.Thread(
-                    target=self._handle_udp_client,
-                    args=(addr, file_size)
-                )
-                client_thread.daemon = True
-                client_thread.start()
-
-            except socket.timeout:
-                continue
             except Exception as e:
-                if self.running:
-                    print(f"\033[91mError handling UDP request: {e}\033[0m")
+                print(f"\033[91mError in request handling: {e}\033[0m")
 
-    def _handle_udp_client(self, addr, file_size):
-        """Handle individual UDP client request"""
+    def _handle_udp_speed_test(self, data, addr):
+        """
+        Handle a UDP speed test request from a client.
+        Args:
+            data: The data received from the client
+            addr: The client's address
+        """
         try:
+            # Unpack the client's request
+            magic_cookie, msg_type, file_size = struct.unpack('!IbQ', data)
+
+            if magic_cookie != self.magic_cookie or msg_type != 0x3:
+                print(f"\033[91mInvalid UDP request from {addr}\033[0m")
+                return
+
+            print(f"\033[94mUDP test request from {addr}, size: {file_size} bytes\033[0m")
+
+            # Calculate the number of segments to send
             segment_size = 1024
             total_segments = (file_size + segment_size - 1) // segment_size
-            print(f"\033[94mStarting UDP transfer to {addr}: {total_segments} segments\033[0m")
 
-            for segment_num in range(total_segments):
-                if not self.running:
-                    break
+            for i in range(total_segments):
+                remaining = min(segment_size, file_size - i * segment_size)  # Calculate remaining bytes
+                payload = b'X' * remaining  # Create a payload of 'X' characters
 
-                current_size = min(segment_size, file_size - segment_num * segment_size)
+                # Create the segment header
                 header = struct.pack('!IbQQ',
                                      self.magic_cookie,
-                                     self.msg_type_payload,
+                                     0x4,
                                      total_segments,
-                                     segment_num
-                                     )
+                                     i)
 
-                payload = b'0' * current_size
-                message = header + payload
-                self.udp_socket.sendto(message, addr)
-                time.sleep(0.001)  # Small delay to prevent network congestion
-
-            print(f"\033[92mUDP transfer completed for {addr}: {total_segments} segments sent\033[0m")
+                # Send the segment to the client
+                self.udp_socket.sendto(header + payload, addr)
 
         except Exception as e:
-            print(f"\033[91mError sending UDP data to {addr}: {e}\033[0m")
+            print(f"\033[91mError handling UDP request: {e}\033[0m")
 
-    def stop_server(self):
-        """Stop the server and clean up resources"""
-        print("\n\033[93mShutting down server...\033[0m")
-        self.running = False
+    def _handle_tcp_client(self, client_socket, addr):
+        """
+        Handle a TCP speed test request from a client.
+        Args:
+            client_socket: The socket connected to the client
+            addr: The client's address
+        """
+        try:
+            client_socket.settimeout(5.0)  # Set a timeout for the client socket
 
-        # Close sockets
-        if hasattr(self, 'tcp_socket') and self.tcp_socket:
-            self.tcp_socket.close()
-        if hasattr(self, 'udp_socket') and self.udp_socket:
-            self.udp_socket.close()
+            # Receive the file size from the client
+            data = client_socket.recv(1024).decode().strip()
+            file_size = int(data)
 
+            print(f"\033[94mTCP test request from {addr}, size: {file_size} bytes\033[0m")
+
+            # Send the requested amount of data to the client
+            data = b'X' * file_size
+            client_socket.sendall(data)
+
+        except Exception as e:
+            print(f"\033[91mError handling TCP client: {e}\033[0m")
+        finally:
+            client_socket.close()  # Close the client socket
+
+    def stop(self):
+        """
+        Stop the server and clean up resources.
+        """
+        self.running = False  # Set the running flag to False
+        try:
+            if hasattr(self, 'udp_socket'):
+                self.udp_socket.close()  # Close the UDP socket
+            if hasattr(self, 'tcp_socket'):
+                self.tcp_socket.close()  # Close the TCP socket
+        except Exception as e:
+            print(f"\033[91mError during cleanup: {e}\033[0m")
 
 if __name__ == "__main__":
-    server = Server()
+    server = SpeedTestServer()  # Create an instance of the server
     try:
-        server.start_server()
+        server.start()  # Start the server
     except KeyboardInterrupt:
-        server.stop_server()
+        server.stop()  # Stop the server on interruption
