@@ -157,16 +157,19 @@ class Client:
         tcp_test_threads = []
         udp_test_threads = []
 
-        try:
-            # Get test configuration from user
-            num_tcp_tests = int(input(f"{self.CYAN}Enter number of TCP connections: {self.RESET}"))
-            num_udp_tests = int(input(f"{self.CYAN}Enter number of UDP connections: {self.RESET}"))
+        def get_test_counts():
+            try:
+                tcp_count = int(input(f"{self.CYAN}Enter number of TCP connections: {self.RESET}"))
+                udp_count = int(input(f"{self.CYAN}Enter number of UDP connections: {self.RESET}"))
+                if tcp_count < 0 or udp_count < 0:
+                    raise ValueError("Connection counts must be positive")
+                return tcp_count, udp_count
+            except (ValueError, TypeError):
+                print(f"{self.RED}Invalid input, using default values{self.RESET}")
+                return 1, 1
 
-        except ValueError:
-            print(f"{self.RED}Invalid input, using default values{self.RESET}")
-            num_tcp_tests = num_udp_tests = 1
-
-            # Initialize statistics for new test session
+        # Initialize statistics for new test session
+        def initialize_performance_data():
             with self.sync_lock:
                 self.performance_data = {
                     'tcp': {
@@ -186,121 +189,156 @@ class Client:
                     }
                 }
 
-        # Launch TCP test threads
-        for test_number in range(num_tcp_tests):
-            if not self.is_running:
-                break
-            tcp_thread = threading.Thread(
-                target=self.perform_tcp_test,
-                args=(server_host, tcp_port, test_number + 1)
-            )
-            tcp_test_threads.append(tcp_thread)
-            tcp_thread.start()
-            time.sleep(THREAD_DELAY)
+        def launch_test_threads(test_type, count, port):
+            threads = []
+            target_func = self.perform_tcp_test if test_type == 'tcp' else self.perform_udp_test
 
-        # Launch UDP test threads
-        for test_number in range(num_udp_tests):
-            if not self.is_running:
-                break
-            udp_thread = threading.Thread(
-                target=self.perform_udp_test,
-                args=(server_host, udp_port, test_number + 1)
-            )
-            udp_test_threads.append(udp_thread)
-            udp_thread.start()
-            time.sleep(THREAD_DELAY)
+            for test_num in range(count):
+                if not self.is_running:
+                    break
 
-        # Wait for tests to complete
-        test_end_time = time.time() + TEST_TIMEOUT
+                thread = threading.Thread(
+                    target=target_func,
+                    args=(server_host, port, test_num + 1),
+                    name=f"{test_type}_test_{test_num}"
+                )
+                thread.daemon = True  # Ensure threads don't block program exit
+                threads.append(thread)
+                thread.start()
+                time.sleep(THREAD_DELAY)
 
-        for thread in tcp_test_threads + udp_test_threads:
-            time_calc = test_end_time - time.time()
-            remaining_time = max(0, time_calc)
-            thread.join(timeout=remaining_time)
+            return threads
 
-        # Display results and reset state
-        self.display_test_results()
-        print(f"{self.YELLOW}All transfers complete, listening to offer requests {self.RESET}")
-        self.state = ClientState.SERVER_DISCOVERY
+        try:
+            # Get test configuration and initialize
+            num_tcp_tests, num_udp_tests = get_test_counts()
+            initialize_performance_data()
+
+            # Launch test threads
+            test_threads = []
+            test_threads.extend(launch_test_threads('tcp', num_tcp_tests, tcp_port))
+            test_threads.extend(launch_test_threads('udp', num_udp_tests, udp_port))
+
+            # Wait for tests with timeout
+            start_time = time.time()
+            for thread in test_threads:
+                remaining_time = max(0, TEST_TIMEOUT - (time.time() - start_time))
+                thread.join(timeout=remaining_time)
+
+                # Check if thread is still alive after timeout
+                if thread.is_alive():
+                    print(f"{self.YELLOW}Warning: {thread.name} did not complete within timeout{self.RESET}")
+
+            # Display results
+            self.display_test_results()
+            print(f"{self.YELLOW}All transfers complete, listening to offer requests{self.RESET}")
+
+        except Exception as e:
+            print(f"{self.RED}Error during performance tests: {str(e)}{self.RESET}")
+
+        finally:
+            # Ensure state is reset even if an error occurs
+            self.state = ClientState.SERVER_DISCOVERY
 
     def perform_tcp_test(self, server_host, server_port, test_number):
         """
         Execute a robust TCP speed test with advanced error handling and configurable retry mechanism.
         """
+        # Constants
         SOCKET_TIMEOUT = 10.0
         RECEIVE_BUFFER = 8388608  # 8MB buffer
         MAX_CHUNK_SIZE = 65536  # 64KB chunks
         RETRY_DELAY = 1.0  # 1 second between retries
         READ_TIMEOUT = 5.0  # 5 seconds read timeout
+
+        def setup_socket():
+            """Create and configure TCP socket with appropriate parameters"""
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(SOCKET_TIMEOUT)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, RECEIVE_BUFFER)
+            return sock
+
+        def handle_data_transfer(sock):
+            """Handle the actual data transfer and timing"""
+            bytes_received = 0
+            transfer_start = time.time()
+
+            while bytes_received < self.file_size and self.is_running:
+                ready_sockets, _, _ = select.select([sock], [], [], READ_TIMEOUT)
+
+                if not ready_sockets:
+                    raise TimeoutError("TCP data transfer timed out")
+
+                remaining_bytes = self.file_size - bytes_received
+                data_chunk = sock.recv(min(MAX_CHUNK_SIZE, remaining_bytes))
+
+                if not data_chunk:
+                    break
+
+                bytes_received += len(data_chunk)
+
+            return time.time() - transfer_start, bytes_received
+
+        def record_success(duration):
+            """Record successful transfer metrics"""
+            transfer_speed = (self.file_size * 8) / duration
+
+            with self.sync_lock:
+                self.performance_data['tcp']['timings'].append(duration)
+                self.performance_data['tcp']['successes'] += 1
+
+            print(f"{self.GREEN}TCP transfer #{test_number} finished"
+                  f" total time: {duration:.3f} seconds,"
+                  f" total speed: {transfer_speed:.2f} bits/second{self.RESET}")
+
+        def record_failure(error_type, error):
+            """Record transfer failure with appropriate categorization"""
+            with self.sync_lock:
+                self.performance_data['tcp']['failures'][error_type] += 1
+
+            color = self.YELLOW if error_type == 'connections' else self.RED
+            print(f"{color}TCP transfer #{test_number} failed: {error}{self.RESET}")
+
         tcp_socket = None
         attempt_count = 0
 
-        while attempt_count < self.max_attempts and self.is_running:
-            try:
-                tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                tcp_socket.settimeout(SOCKET_TIMEOUT)
-                tcp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, RECEIVE_BUFFER)
-
-                with self.sync_lock:
-                    self.active_tests += 1
-
-                # Establish connection and send test parameters
-                tcp_socket.connect((server_host, server_port))
-                test_request = f"{self.file_size}\n".encode()
-                tcp_socket.send(test_request)
-                # Start data transfer and timing
-                bytes_received = 0
-                transfer_start = time.time()
-
-                while bytes_received < self.file_size and self.is_running:
-                    ready_sockets, _, remaining_sockets = select.select([tcp_socket], [], [], READ_TIMEOUT)
-
-                    if not ready_sockets:
-                        raise TimeoutError("TCP data transfer timed out")
-
-                    remaining_bytes = self.file_size - bytes_received
-                    data_chunk = tcp_socket.recv(min(MAX_CHUNK_SIZE, remaining_bytes))
-
-                    if not data_chunk:
-                        break
-
-                    bytes_received += len(data_chunk)
-
-                transfer_duration = time.time() - transfer_start
-
-                if transfer_duration > 0:
-                    transfer_speed = (self.file_size * 8) / transfer_duration
+        try:
+            while attempt_count < self.max_attempts and self.is_running:
+                try:
+                    # Setup and connection phase
+                    tcp_socket = setup_socket()
 
                     with self.sync_lock:
-                        self.performance_data['tcp']['timings'].append(transfer_duration)
-                        self.performance_data['tcp']['successes'] += 1
+                        self.active_tests += 1
 
-                    print(f"{self.GREEN}TCP transfer #{test_number} finished"
-                          f" total time: {transfer_duration:.3f} seconds,"
-                          f" total speed: {transfer_speed:.2f} bits/second {self.RESET}")
-                # Success
-                break
+                    # Connect and send test parameters
+                    tcp_socket.connect((server_host, server_port))
+                    tcp_socket.send(f"{self.file_size}\n".encode())
 
-            except (ConnectionRefusedError, TimeoutError) as conn_error:
-                attempt_count += 1
-                with self.sync_lock:
-                    self.performance_data['tcp']['failures']['connections'] += 1
-                print(f"{self.YELLOW}TCP transfer #{test_number} failed "
-                      f"(attempt {attempt_count}/{self.max_attempts}): {conn_error}{self.RESET}")
-                time.sleep(RETRY_DELAY)
+                    # Execute transfer
+                    duration, bytes_received = handle_data_transfer(tcp_socket)
 
-            except Exception as error:
-                with self.sync_lock:
-                    self.performance_data['tcp']['failures']['transfers'] += 1
+                    # Verify complete transfer
+                    if duration > 0:
+                        record_success(duration)
+                        break
+                    else:
+                        raise ConnectionError("Invalid transfer duration - zero or negative time")
 
-                print(f"{self.RED}TCP transfer #{test_number} error: {error}{self.RESET}")
-                break
+                except (ConnectionRefusedError, TimeoutError) as e:
+                    attempt_count += 1
+                    record_failure('connections', f"{str(e)} (attempt {attempt_count}/{self.max_attempts})")
+                    time.sleep(RETRY_DELAY)
 
-            finally:
-                if tcp_socket:
-                    tcp_socket.close()
-                with self.sync_lock:
-                    self.active_tests -= 1
+                except Exception as e:
+                    record_failure('transfers', str(e))
+                    break
+
+        finally:
+            if tcp_socket:
+                tcp_socket.close()
+            with self.sync_lock:
+                self.active_tests -= 1
 
     def perform_udp_test(self, server_host, server_port, test_number):
         """
@@ -313,12 +351,26 @@ class Client:
         PACKET_TIMEOUT = 1.0  # Timeout for packet reception
         udp_socket = None
 
+        def process_packet(packet_data):
+            """Process a received packet and return segment info if valid"""
+            if len(packet_data) < HEADER_SIZE:
+                return None
+
+            header = packet_data[:HEADER_SIZE]
+            received_cookie, msg_type, total_segs, current_seg = struct.unpack('!IbQQ', header)
+
+            if received_cookie != self.protocol_cookie or msg_type != 0x4:
+                return None
+
+            return total_segs, current_seg
+
         try:
             udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             udp_socket.settimeout(SOCKET_TIMEOUT)
             udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, RECEIVE_BUFFER)
             test_request = struct.pack('!IbQ', self.protocol_cookie, 0x3, self.file_size)
             udp_socket.sendto(test_request, (server_host, server_port))
+
             total_segments = None
             received_segments = set()
             test_start = time.time()
@@ -326,21 +378,18 @@ class Client:
 
             while (time.time() - last_packet) < SOCKET_TIMEOUT and self.is_running:
                 try:
-                    ready_sockets, keep_space_1, keep_space_2 = select.select([udp_socket], [], [], PACKET_TIMEOUT)
+                    ready_sockets, _, _ = select.select([udp_socket], [], [], PACKET_TIMEOUT)
                     if not ready_sockets:
                         continue
 
-                    packet_data, keepspace = udp_socket.recvfrom(PACKET_SIZE)
-                    if len(packet_data) < HEADER_SIZE:
+                    packet_data, _ = udp_socket.recvfrom(PACKET_SIZE)
+                    packet_info = process_packet(packet_data)
+
+                    if not packet_info:
                         continue
 
-                    # Extract packet header
-                    header = packet_data[:HEADER_SIZE]
-                    received_cookie, msg_type, total_segs, current_seg = struct.unpack('!IbQQ', header)
-                    # Validate packet
-                    if received_cookie != self.protocol_cookie or msg_type != 0x4:
-                        continue
-                    # Track segments
+                    total_segs, current_seg = packet_info
+
                     if total_segments is None:
                         total_segments = total_segs
 
@@ -350,13 +399,12 @@ class Client:
                         self.performance_data['udp']['packets']['received'] += 1
                     last_packet = time.time()
 
-                    # Check if all segments received
                     if len(received_segments) == total_segments:
                         break
 
                 except socket.timeout:
                     break
-            # Calculate performance metrics
+
             test_duration = time.time() - test_start
 
             if total_segments:
