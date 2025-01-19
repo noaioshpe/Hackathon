@@ -17,6 +17,7 @@ class ClientState(Enum):
 
 
 class Client:
+
     # ANSI color codes
     RED = '\033[91m'  # Errors and failures
     GREEN = '\033[92m'  # Success messages
@@ -25,11 +26,6 @@ class Client:
     MAGENTA = '\033[95m'  # Headers and titles
     CYAN = '\033[96m'  # User input prompts
     RESET = '\033[0m'  # Reset color
-
-    """
-    An improved client class that performs network speed tests using both TCP and UDP protocols.
-    Includes enhanced connection handling and retry mechanisms.
-    """
 
     def __init__(self, discovery_port=13117):
         """
@@ -51,42 +47,37 @@ class Client:
 
         self.performance_data = {
             'tcp': {
-                'timings': [],  # Same as tcp_times
+                'timings': [],
                 'failures': {
-                    'connections': 0,  # Same as tcp_connect_fails
-                    'transfers': 0  # Same as tcp_transfer_fails
+                    'connections': 0,
+                    'transfers': 0
                 },
-                'successes': 0  # Same as successful_tests
+                'successes': 0
             },
             'udp': {
-                'timings': [],  # Same as udp_times
+                'timings': [],
                 'packets': {
-                    'received': 0,  # Same as udp_received
-                    'lost': 0  # Same as udp_lost
+                    'received': 0,
+                    'lost': 0
                 }
             }
         }
 
         # Set up graceful shutdown handlers
-        signal.signal(signal.SIGINT, self._cleanup_handler)
-        signal.signal(signal.SIGTERM, self._cleanup_handler)
+        signal.signal(signal.SIGINT, self.handle_shutdown)
+        signal.signal(signal.SIGTERM, self.handle_shutdown)
 
-    def _cleanup_handler(self, signum, frame):
-        """Handle system signals for graceful shutdown."""
-        print("\nShutting down client...")
-        self.is_running = False
-
-    def start(self):
+    def initialize_client(self):
         """Start the speed test client with improved error handling."""
         print(f"{self.MAGENTA}Starting Speed Test Client{self.RESET}")
         print(f"{self.MAGENTA}Press Ctrl+C to exit{self.RESET}")
 
-        while self.running:
+        while self.is_running:
             try:
                 self.file_size = self._get_file_size()
                 self.state = ClientState.SERVER_DISCOVERY
-                self._setup_udp_socket()
-                self._discover_server()
+                self.initialize_udp_socket()
+                self.find_available_server()
             except KeyboardInterrupt:
                 break
             except Exception as e:
@@ -95,7 +86,12 @@ class Client:
 
         self._cleanup()
 
-    def _setup_udp_socket(self):
+    def handle_shutdown(self, signum, frame):
+        """Handle system signals for graceful shutdown."""
+        print("\nShutting down client...")
+        self.is_running = False
+
+    def initialize_udp_socket(self):
         try:
             """Setup UDP socket with improved configuration."""
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -107,20 +103,7 @@ class Client:
             print(f"{self.RED}Error setting up UDP socket: {e}{self.RESET}")
             raise
 
-    def _get_file_size(self):
-        """Get desired file size from user input with validation."""
-        while True:
-            try:
-                size = input(f"{self.CYAN}Enter file size for speed test (in bytes): {self.RESET}")
-                size_int = int(size)
-                if size_int <= 0:
-                    print(f"{self.RED}File size must be positive{self.RESET}")
-                    continue
-                return size_int
-            except ValueError:
-                print(f"{self.RED}Please enter a valid number{self.RESET}")
-
-    def _discover_server(self):
+    def find_available_server(self):
         """Discover speed test servers with improved timeout handling."""
         print(f"{self.YELLOW}Looking for speed test server...{self.RESET}")
 
@@ -128,7 +111,7 @@ class Client:
         EXPECTED_MSG_SIZE = 9  # Magic(4) + Type(1) + UDP(2) + TCP(2)
         SERVER_MSG_TYPE = 0x2
 
-        while self.running and self.state == ClientState.SERVER_DISCOVERY:
+        while self.is_running and self.state == ClientState.SERVER_DISCOVERY:
             try:
                 socket_ready, _, _ = select.select([self.udp_socket], [], [], TIMEOUT_INTERVAL)
 
@@ -145,7 +128,7 @@ class Client:
 
                             self.state = ClientState.PERFORMANCE_TEST
 
-                            self._run_speed_test(
+                            self.execute_performance_tests(
                                 server_host=server_address[0],
                                 udp_port=server_udp_port,
                                 tcp_port=server_tcp_port
@@ -156,7 +139,98 @@ class Client:
                 print(f"{self.RED}Error discovering server: {e}{self.RESET}")
                 time.sleep(1)
 
-    def _run_tcp_test(self, server_host, server_port, test_number):
+    def _get_file_size(self):
+        """Get desired file size from user input with validation."""
+        while True:
+            try:
+                size = input(f"{self.CYAN}Enter file size for speed test (in bytes): {self.RESET}")
+                size_int = int(size)
+                if size_int <= 0:
+                    print(f"{self.RED}File size must be positive{self.RESET}")
+                    continue
+                return size_int
+            except ValueError:
+                print(f"{self.RED}Please enter a valid number{self.RESET}")
+
+    def execute_performance_tests(self, server_host, udp_port, tcp_port):
+        """
+        Coordinate speed tests with improved thread management and connection throttling.
+        """
+        THREAD_DELAY = 0.05  # 50ms delay between thread starts
+        TEST_TIMEOUT = 60  # 60 second total test timeout
+
+        tcp_test_threads = []
+        udp_test_threads = []
+
+        try:
+            # Get test configuration from user
+            num_tcp_tests = int(input(f"{self.CYAN}Enter number of TCP connections: {self.RESET}"))
+            num_udp_tests = int(input(f"{self.CYAN}Enter number of UDP connections: {self.RESET}"))
+
+        except ValueError:
+            print(f"{self.RED}Invalid input, using default values (1 each){self.RESET}")
+            num_tcp_tests = num_udp_tests = 1
+
+            # Initialize statistics for new test session
+            with self.sync_lock:
+                self.performance_data = {
+                    'tcp': {
+                        'timings': [],
+                        'failures': {
+                            'connections': 0,
+                            'transfers': 0
+                        },
+                        'successes': 0
+                    },
+                    'udp': {
+                        'timings': [],
+                        'packets': {
+                            'received': 0,
+                            'lost': 0
+                        }
+                    }
+                }
+
+        # Launch TCP test threads
+        for test_number in range(num_tcp_tests):
+            if not self.is_running:
+                break
+
+            tcp_thread = threading.Thread(
+                target=self.perform_tcp_test,
+                args=(server_host, tcp_port, test_number + 1)
+            )
+            tcp_test_threads.append(tcp_thread)
+            tcp_thread.start()
+            time.sleep(THREAD_DELAY)
+
+        # Launch UDP test threads
+        for test_number in range(num_udp_tests):
+            if not self.is_running:
+                break
+
+            udp_thread = threading.Thread(
+                target=self.perform_udp_test,
+                args=(server_host, udp_port, test_number + 1)
+            )
+
+            udp_test_threads.append(udp_thread)
+            udp_thread.start()
+            time.sleep(THREAD_DELAY)
+
+        # Wait for tests to complete
+        test_end_time = time.time() + TEST_TIMEOUT
+
+        for thread in tcp_test_threads + udp_test_threads:
+            remaining_time = max(0, test_end_time - time.time())
+            thread.join(timeout=remaining_time)
+
+        # Display results and reset state
+        self.display_test_results()
+        print(f"{self.YELLOW}All transfers complete, listening for new offers{self.RESET}")
+        self.state = ClientState.SERVER_DISCOVERY
+
+    def perform_tcp_test(self, server_host, server_port, test_number):
         """
         Perform TCP speed test with improved error handling and retry mechanism.
         """
@@ -170,7 +244,7 @@ class Client:
         tcp_socket = None
         attempt_count = 0
 
-        while attempt_count < self.max_attempts and self.running:
+        while attempt_count < self.max_attempts and self.is_running:
             try:
                 tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 tcp_socket.settimeout(SOCKET_TIMEOUT)
@@ -188,7 +262,7 @@ class Client:
                 transfer_start = time.time()
                 bytes_received = 0
 
-                while bytes_received < self.file_size and self.running:
+                while bytes_received < self.file_size and self.is_running:
                     ready_sockets, _, _ = select.select([tcp_socket], [], [], READ_TIMEOUT)
 
                     if not ready_sockets:
@@ -237,7 +311,7 @@ class Client:
                 with self.sync_lock:
                     self.active_tests -= 1
 
-    def _run_udp_test(self, server_host, server_port, test_number):
+    def perform_udp_test(self, server_host, server_port, test_number):
         """
         Perform UDP speed test with improved packet tracking and error handling.
         """
@@ -262,7 +336,7 @@ class Client:
             test_start = time.time()
             last_packet = test_start
 
-            while (time.time() - last_packet) < SOCKET_TIMEOUT and self.running:
+            while (time.time() - last_packet) < SOCKET_TIMEOUT and self.is_running:
                 try:
                     ready_sockets, _, _ = select.select([udp_socket], [], [], PACKET_TIMEOUT)
                     if not ready_sockets:
@@ -322,93 +396,15 @@ class Client:
             if udp_socket:
                 udp_socket.close()
 
-    def _run_speed_test(self, server_host, udp_port, tcp_port):
-        """
-        Coordinate speed tests with improved thread management and connection throttling.
-        """
-        THREAD_DELAY = 0.05  # 50ms delay between thread starts
-        TEST_TIMEOUT = 60  # 60 second total test timeout
-
-        tcp_test_threads = []
-        udp_test_threads = []
-
-        try:
-            # Get test configuration from user
-            num_tcp_tests = int(input(f"{self.CYAN}Enter number of TCP connections: {self.RESET}"))
-            num_udp_tests = int(input(f"{self.CYAN}Enter number of UDP connections: {self.RESET}"))
-
-        except ValueError:
-            print(f"{self.RED}Invalid input, using default values (1 each){self.RESET}")
-            num_tcp_tests = num_udp_tests = 1
-
-            # Initialize statistics for new test session
-            with self.sync_lock:
-                self.performance_data = {
-                    'tcp': {
-                        'timings': [],
-                        'failures': {
-                            'connections': 0,
-                            'transfers': 0
-                        },
-                        'successes': 0
-                    },
-                    'udp': {
-                        'timings': [],
-                        'packets': {
-                            'received': 0,
-                            'lost': 0
-                        }
-                    }
-                }
-
-        # Launch TCP test threads
-        for test_number in range(num_tcp_tests):
-            if not self.running:
-                break
-
-            tcp_thread = threading.Thread(
-                target=self._run_tcp_test,
-                args=(server_host, tcp_port, test_number + 1)
-            )
-            tcp_test_threads.append(tcp_thread)
-            tcp_thread.start()
-            time.sleep(THREAD_DELAY)
-
-        # Launch UDP test threads
-        for test_number in range(num_udp_tests):
-            if not self.running:
-                break
-
-            udp_thread = threading.Thread(
-                target=self._run_udp_test,
-                args=(server_host, udp_port, test_number + 1)
-            )
-
-            udp_test_threads.append(udp_thread)
-            udp_thread.start()
-            time.sleep(THREAD_DELAY)
-
-        # Wait for tests to complete
-        test_end_time = time.time() + TEST_TIMEOUT
-
-        for thread in tcp_test_threads + udp_test_threads:
-            remaining_time = max(0, test_end_time - time.time())
-            thread.join(timeout=remaining_time)
-
-        # Display results and reset state
-        self._print_statistics()
-        print(f"{self.YELLOW}All transfers complete, listening for new offers{self.RESET}")
-        self.state = ClientState.SERVER_DISCOVERY
-
-    def _print_statistics(self):
+    def display_test_results(self):
         """Display comprehensive performance statistics for TCP and UDP tests."""
         print(f"\n{self.MAGENTA}=== Speed Test Statistics ==={self.RESET}")
 
         with self.sync_lock:
-            self._print_tcp_statistics()
-            self._print_udp_statistics()
+            self.display_tcp_metrics()
+            self.display_udp_metrics()
 
-    def _print_tcp_statistics(self):
+    def display_tcp_metrics(self):
         """Display TCP-specific performance metrics."""
         tcp_data = self.performance_data['tcp']
 
@@ -423,7 +419,7 @@ class Client:
             print(f"- Connection Failures: {tcp_data['failures']['connections']}")
             print(f"- Transfer Failures: {tcp_data['failures']['transfers']}{self.RESET}")
 
-    def _print_udp_statistics(self):
+    def display_udp_metrics(self):
         """Display UDP-specific performance metrics."""
         udp_data = self.performance_data['udp']
 
