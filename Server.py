@@ -6,6 +6,7 @@ import random  # For generating random port numbers
 import select  # For non-blocking I/O
 import signal  # For handling system signals
 
+
 class SpeedTestServer:
     """
     A server class that handles network speed testing using both TCP and UDP protocols.

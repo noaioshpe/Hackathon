@@ -237,77 +237,87 @@ class Client:
                 with self.sync_lock:
                     self.active_tests -= 1
 
-###############################################################
-
-    def _run_udp_test(self, server_host, server_port, transfer_num):
+    def _run_udp_test(self, server_host, server_port, test_number):
         """
         Perform UDP speed test with improved packet tracking and error handling.
         """
+        SOCKET_TIMEOUT = 5.0
+        RECEIVE_BUFFER = 8388608  # 8MB buffer
+        PACKET_SIZE = 4096  # 4KB packet size
+        HEADER_SIZE = 21  # Magic(4) + Type(1) + Total(8) + Current(8)
+        PACKET_TIMEOUT = 1.0  # Timeout for packet reception
+
         udp_socket = None
+
         try:
             udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            udp_socket.settimeout(5.0)
-            udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8388608)
+            udp_socket.settimeout(SOCKET_TIMEOUT)
+            udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, RECEIVE_BUFFER)
 
-            request = struct.pack('!IbQ', self.magic_cookie, 0x3, self.file_size)
-            udp_socket.sendto(request, (server_host, server_port))
+            test_request = struct.pack('!IbQ', self.protocol_cookie, 0x3, self.file_size)
+            udp_socket.sendto(test_request, (server_host, server_port))
 
-            received_segments = set()
             total_segments = None
-            start_time = time.time()
-            last_packet_time = start_time
+            received_segments = set()
+            test_start = time.time()
+            last_packet = test_start
 
-            while (time.time() - last_packet_time) < 5.0 and self.running:
+            while (time.time() - last_packet) < SOCKET_TIMEOUT and self.running:
                 try:
-                    readable, _, _ = select.select([udp_socket], [], [], 1.0)
-                    if not readable:
+                    ready_sockets, _, _ = select.select([udp_socket], [], [], PACKET_TIMEOUT)
+                    if not ready_sockets:
                         continue
 
-                    data, _ = udp_socket.recvfrom(4096)
-                    if len(data) < 21:
+                    packet_data, _ = udp_socket.recvfrom(PACKET_SIZE)
+                    if len(packet_data) < HEADER_SIZE:
                         continue
 
-                    header = data[:21]
-                    magic_cookie, msg_type, total_segs, current_seg = struct.unpack('!IbQQ', header)
+                    # Extract packet header
+                    header = packet_data[:HEADER_SIZE]
+                    received_cookie, msg_type, total_segs, current_seg = struct.unpack('!IbQQ', header)
 
-                    if magic_cookie != self.magic_cookie or msg_type != 0x4:
+                    # Validate packet
+                    if received_cookie != self.protocol_cookie or msg_type != 0x4:
                         continue
 
+                    # Track segments
                     if total_segments is None:
                         total_segments = total_segs
 
                     received_segments.add(current_seg)
-                    with self.connection_lock:
-                        self.statistics['udp_packets_received'] += 1
-                    last_packet_time = time.time()
 
+                    with self.sync_lock:
+                        self.performance_data['udp']['packets']['received'] += 1
+                    last_packet = time.time()
+
+                    # Check if all segments received
                     if len(received_segments) == total_segments:
                         break
 
                 except socket.timeout:
                     break
 
-            end_time = time.time()
-            transfer_time = end_time - start_time
+            # Calculate performance metrics
+            test_duration = time.time() - test_start
 
             if total_segments:
-                packets_lost = total_segments - len(received_segments)
-                loss_rate = (packets_lost / total_segments) * 100
-                speed = (self.file_size * 8) / transfer_time
+                lost_packets = total_segments - len(received_segments)
+                loss_percentage = (lost_packets / total_segments) * 100
+                transfer_speed = (self.file_size * 8) / test_duration
 
-                with self.connection_lock:
-                    self.statistics['udp_times'].append(transfer_time)
-                    self.statistics['udp_packets_lost'] += packets_lost
+                with self.sync_lock:
+                    self.performance_data['udp']['timings'].append(test_duration)
+                    self.performance_data['udp']['packets']['lost'] += lost_packets
 
-                print(f"\033[92mUDP transfer #{transfer_num} finished:"
-                      f" Time: {transfer_time:.3f}s,"
-                      f" Speed: {speed:.2f} bits/second,"
-                      f" Success rate: {100 - loss_rate:.2f}%\033[0m")
+                print(f"{self.GREEN}UDP transfer #{test_number} finished:"
+                      f" Time: {test_duration:.3f}s,"
+                      f" Speed: {transfer_speed:.2f} bits/second,"
+                      f" Success rate: {100 - loss_percentage:.2f}%{self.RESET}")
             else:
-                print(f"\033[91mUDP transfer #{transfer_num} failed: No segments received\033[0m")
+                print(f"{self.RED}UDP transfer #{test_number} failed: No segments received{self.RESET}")
 
-        except Exception as e:
-            print(f"\033[91mUDP transfer #{transfer_num} error: {e}\033[0m")
+        except Exception as error:
+            print(f"{self.RED}UDP transfer #{test_number} error: {error}{self.RESET}")
         finally:
             if udp_socket:
                 udp_socket.close()
@@ -316,95 +326,141 @@ class Client:
         """
         Coordinate speed tests with improved thread management and connection throttling.
         """
-        tcp_threads = []
-        udp_threads = []
+        THREAD_DELAY = 0.05  # 50ms delay between thread starts
+        TEST_TIMEOUT = 60  # 60 second total test timeout
+
+        tcp_test_threads = []
+        udp_test_threads = []
 
         try:
-            num_tcp = int(input("\033[96mEnter number of TCP connections: \033[0m"))
-            num_udp = int(input("\033[96mEnter number of UDP connections: \033[0m"))
+            # Get test configuration from user
+            num_tcp_tests = int(input(f"{self.CYAN}Enter number of TCP connections: {self.RESET}"))
+            num_udp_tests = int(input(f"{self.CYAN}Enter number of UDP connections: {self.RESET}"))
+
         except ValueError:
-            print("\033[91mInvalid input, using default values (1 each)\033[0m")
-            num_tcp = num_udp = 1
+            print(f"{self.RED}Invalid input, using default values (1 each){self.RESET}")
+            num_tcp_tests = num_udp_tests = 1
 
-        # Reset statistics for new test
-        with self.connection_lock:
-            self.statistics = {
-                'tcp_times': [],
-                'udp_times': [],
-                'udp_packets_received': 0,
-                'udp_packets_lost': 0,
-                'tcp_connection_failures': 0,
-                'tcp_transfer_failures': 0,
-                'successful_connections': 0
-            }
+            # Initialize statistics for new test session
+            with self.sync_lock:
+                self.performance_data = {
+                    'tcp': {
+                        'timings': [],
+                        'failures': {
+                            'connections': 0,
+                            'transfers': 0
+                        },
+                        'successes': 0
+                    },
+                    'udp': {
+                        'timings': [],
+                        'packets': {
+                            'received': 0,
+                            'lost': 0
+                        }
+                    }
+                }
 
-        # Add delay between connection attempts to prevent overwhelming the server
-        delay_between_connections = 0.05  # 50ms delay
-
-        # Start TCP test threads with delay
-        for i in range(num_tcp):
+        # Launch TCP test threads
+        for test_number in range(num_tcp_tests):
             if not self.running:
                 break
+
             tcp_thread = threading.Thread(
                 target=self._run_tcp_test,
-                args=(server_host, tcp_port, i + 1)
+                args=(server_host, tcp_port, test_number + 1)
             )
-            tcp_threads.append(tcp_thread)
+            tcp_test_threads.append(tcp_thread)
             tcp_thread.start()
-            time.sleep(delay_between_connections)
+            time.sleep(THREAD_DELAY)
 
-        # Start UDP test threads with delay
-        for i in range(num_udp):
+        # Launch UDP test threads
+        for test_number in range(num_udp_tests):
             if not self.running:
                 break
+
             udp_thread = threading.Thread(
                 target=self._run_udp_test,
-                args=(server_host, udp_port, i + 1)
+                args=(server_host, udp_port, test_number + 1)
             )
-            udp_threads.append(udp_thread)
-            udp_thread.start()
-            time.sleep(delay_between_connections)
 
-        # Wait for all threads to complete with timeout
-        end_time = time.time() + 60  # 60 second timeout
-        for thread in tcp_threads + udp_threads:
-            remaining_time = max(0, end_time - time.time())
+            udp_test_threads.append(udp_thread)
+            udp_thread.start()
+            time.sleep(THREAD_DELAY)
+
+        # Wait for tests to complete
+        test_end_time = time.time() + TEST_TIMEOUT
+
+        for thread in tcp_test_threads + udp_test_threads:
+            remaining_time = max(0, test_end_time - time.time())
             thread.join(timeout=remaining_time)
 
+        # Display results and reset state
         self._print_statistics()
-        print("\033[93mAll transfers complete, listening for new offers\033[0m")
-        self.state = ClientState.LOOKING_FOR_SERVER
+        print(f"{self.YELLOW}All transfers complete, listening for new offers{self.RESET}")
+        self.state = ClientState.SERVER_DISCOVERY
 
     def _print_statistics(self):
-        """Display comprehensive test results and statistics."""
-        print("\n\033[95m=== Speed Test Statistics ===\033[0m")
+        """Display comprehensive performance statistics for TCP and UDP tests."""
+        print(f"\n{self.MAGENTA}=== Speed Test Statistics ==={self.RESET}")
 
-        with self.connection_lock:
-            if self.statistics['tcp_times']:
-                avg_tcp = statistics.mean(self.statistics['tcp_times'])
-                print(f"\033[96mTCP Statistics:")
-                print(f"- Average Time: {avg_tcp:.3f}s")
-                print(f"- Average Speed: {(self.file_size * 8 / avg_tcp):.2f} bits/second")
-                print(f"- Successful Connections: {self.statistics['successful_connections']}")
-                print(f"- Connection Failures: {self.statistics['tcp_connection_failures']}")
-                print(f"- Transfer Failures: {self.statistics['tcp_transfer_failures']}\033[0m")
+        with self.sync_lock:
+            self._print_tcp_statistics()
+            self._print_udp_statistics()
 
-            if self.statistics['udp_times']:
-                avg_udp = statistics.mean(self.statistics['udp_times'])
-                total_packets = self.statistics['udp_packets_received'] + self.statistics['udp_packets_lost']
-                loss_rate = (self.statistics['udp_packets_lost'] / total_packets * 100) if total_packets > 0 else 0
-                print(f"\033[96mUDP Statistics:")
-                print(f"- Average Time: {avg_udp:.3f}s")
-                print(f"- Average Speed: {(self.file_size * 8 / avg_udp):.2f} bits/second")
-                print(f"- Packet Loss Rate: {loss_rate:.2f}%\033[0m")
+    def _print_tcp_statistics(self):
+        """Display TCP-specific performance metrics."""
+        tcp_data = self.performance_data['tcp']
+
+        if tcp_data['timings']:
+            avg_duration = statistics.mean(tcp_data['timings'])
+            avg_speed = (self.file_size * 8) / avg_duration
+
+            print(f"{self.CYAN}TCP Statistics:")
+            print(f"- Average Time: {avg_duration:.3f}s")
+            print(f"- Average Speed: {avg_speed:.2f} bits/second")
+            print(f"- Successful Transfers: {tcp_data['successes']}")
+            print(f"- Connection Failures: {tcp_data['failures']['connections']}")
+            print(f"- Transfer Failures: {tcp_data['failures']['transfers']}{self.RESET}")
+
+    def _print_udp_statistics(self):
+        """Display UDP-specific performance metrics."""
+        udp_data = self.performance_data['udp']
+
+        if udp_data['timings']:
+            avg_duration = statistics.mean(udp_data['timings'])
+            avg_speed = (self.file_size * 8) / avg_duration
+
+            total_packets = udp_data['packets']['received'] + udp_data['packets']['lost']
+            if total_packets > 0:
+                packet_loss = (udp_data['packets']['lost'] / total_packets * 100)
+            else:
+                packet_loss = 0
+
+            print(f"{self.CYAN}UDP Statistics:")
+            print(f"- Average Time: {avg_duration:.3f}s")
+            print(f"- Average Speed: {avg_speed:.2f} bits/second")
+            print(f"- Packet Loss Rate: {packet_loss:.2f}%{self.RESET}")
 
     def _cleanup(self):
-        """Clean up resources before exiting."""
+        """Safely release all network resources and socket connections."""
         try:
+            # Close UDP socket if it exists
             if hasattr(self, 'udp_socket'):
-                self.udp_socket.close()
-        except Exception as e:
-            print(f"\033[91mError during cleanup: {e}\033[0m")
+                try:
+                    self.udp_socket.close()
+                    print(f"{self.BLUE}UDP socket closed successfully{self.RESET}")
+                except Exception as socket_error:
+                    print(f"{self.RED}Failed to close UDP socket: {socket_error}{self.RESET}")
+
+            # Additional cleanup could be added here
+            print(f"{self.GREEN}Cleanup completed{self.RESET}")
+
+        except Exception as error:
+            print(f"{self.RED}Error during cleanup: {error}{self.RESET}")
+        finally:
+            # Ensure running flag is set to False
+            self.is_running = False
 
 
 if __name__ == "__main__":
