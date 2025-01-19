@@ -152,10 +152,8 @@ class Client:
         """
         Coordinate comprehensive network performance tests across multiple TCP and UDP connections
         """
-
         THREAD_DELAY = 0.05  # 50ms delay between thread starts
         TEST_TIMEOUT = 60  # 60 second total test timeout
-
         tcp_test_threads = []
         udp_test_threads = []
 
@@ -192,7 +190,6 @@ class Client:
         for test_number in range(num_tcp_tests):
             if not self.is_running:
                 break
-
             tcp_thread = threading.Thread(
                 target=self.perform_tcp_test,
                 args=(server_host, tcp_port, test_number + 1)
@@ -205,12 +202,10 @@ class Client:
         for test_number in range(num_udp_tests):
             if not self.is_running:
                 break
-
             udp_thread = threading.Thread(
                 target=self.perform_udp_test,
                 args=(server_host, udp_port, test_number + 1)
             )
-
             udp_test_threads.append(udp_thread)
             udp_thread.start()
             time.sleep(THREAD_DELAY)
@@ -232,13 +227,11 @@ class Client:
         """
         Execute a robust TCP speed test with advanced error handling and configurable retry mechanism.
         """
-
         SOCKET_TIMEOUT = 10.0
         RECEIVE_BUFFER = 8388608  # 8MB buffer
         MAX_CHUNK_SIZE = 65536  # 64KB chunks
         RETRY_DELAY = 1.0  # 1 second between retries
         READ_TIMEOUT = 5.0  # 5 seconds read timeout
-
         tcp_socket = None
         attempt_count = 0
 
@@ -273,12 +266,10 @@ class Client:
                         break
 
                     bytes_received += len(data_chunk)
-
                 transfer_duration = time.time() - transfer_start
 
                 if transfer_duration > 0:
                     transfer_speed = (self.file_size * 8) / transfer_duration
-
                     with self.sync_lock:
                         self.performance_data['tcp']['timings'].append(transfer_duration)
                         self.performance_data['tcp']['successes'] += 1
@@ -286,8 +277,8 @@ class Client:
                     print(f"{self.GREEN}TCP transfer #{test_number} finished"
                           f" total time: {transfer_duration:.3f} seconds,"
                           f" total speed: {transfer_speed:.2f} bits/second {self.RESET}")
-
-                break  # Success, exit retry loop
+                # Success, exit retry loop
+                break
 
             except (ConnectionRefusedError, TimeoutError) as conn_error:
                 attempt_count += 1
@@ -295,7 +286,7 @@ class Client:
                     self.performance_data['tcp']['failures']['connections'] += 1
                 print(f"{self.YELLOW}TCP transfer #{test_number} failed "
                       f"(attempt {attempt_count}/{self.max_attempts}): {conn_error}{self.RESET}")
-                time.sleep(RETRY_DELAY)  # Wait before retry
+                time.sleep(RETRY_DELAY)
 
             except Exception as error:
                 with self.sync_lock:
@@ -313,23 +304,19 @@ class Client:
         """
         Execute a comprehensive UDP speed test with advanced packet tracking and reliability analysis
         """
-
         SOCKET_TIMEOUT = 5.0
         RECEIVE_BUFFER = 8388608  # 8MB buffer
         PACKET_SIZE = 4096  # 4KB packet size
         HEADER_SIZE = 21  # Magic(4) + Type(1) + Total(8) + Current(8)
         PACKET_TIMEOUT = 1.0  # Timeout for packet reception
-
         udp_socket = None
 
         try:
             udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             udp_socket.settimeout(SOCKET_TIMEOUT)
             udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, RECEIVE_BUFFER)
-
             test_request = struct.pack('!IbQ', self.protocol_cookie, 0x3, self.file_size)
             udp_socket.sendto(test_request, (server_host, server_port))
-
             total_segments = None
             received_segments = set()
             test_start = time.time()
@@ -348,11 +335,9 @@ class Client:
                     # Extract packet header
                     header = packet_data[:HEADER_SIZE]
                     received_cookie, msg_type, total_segs, current_seg = struct.unpack('!IbQQ', header)
-
                     # Validate packet
                     if received_cookie != self.protocol_cookie or msg_type != 0x4:
                         continue
-
                     # Track segments
                     if total_segments is None:
                         total_segments = total_segs
