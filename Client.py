@@ -17,7 +17,6 @@ class ClientState(Enum):
 
 
 class Client:
-
     # ANSI color codes
     RED = '\033[91m'  # Errors and failures
     GREEN = '\033[92m'  # Success messages
