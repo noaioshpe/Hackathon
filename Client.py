@@ -248,13 +248,12 @@ class Client:
                 tcp_socket.connect((server_host, server_port))
                 test_request = f"{self.file_size}\n".encode()
                 tcp_socket.send(test_request)
-
                 # Start data transfer and timing
-                transfer_start = time.time()
                 bytes_received = 0
+                transfer_start = time.time()
 
                 while bytes_received < self.file_size and self.is_running:
-                    ready_sockets, _, _ = select.select([tcp_socket], [], [], READ_TIMEOUT)
+                    ready_sockets, _, remaining_sockets = select.select([tcp_socket], [], [], READ_TIMEOUT)
 
                     if not ready_sockets:
                         raise TimeoutError("TCP data transfer timed out")
@@ -266,10 +265,12 @@ class Client:
                         break
 
                     bytes_received += len(data_chunk)
+
                 transfer_duration = time.time() - transfer_start
 
                 if transfer_duration > 0:
                     transfer_speed = (self.file_size * 8) / transfer_duration
+
                     with self.sync_lock:
                         self.performance_data['tcp']['timings'].append(transfer_duration)
                         self.performance_data['tcp']['successes'] += 1
@@ -277,7 +278,7 @@ class Client:
                     print(f"{self.GREEN}TCP transfer #{test_number} finished"
                           f" total time: {transfer_duration:.3f} seconds,"
                           f" total speed: {transfer_speed:.2f} bits/second {self.RESET}")
-                # Success, exit retry loop
+                # Success
                 break
 
             except (ConnectionRefusedError, TimeoutError) as conn_error:
@@ -291,6 +292,7 @@ class Client:
             except Exception as error:
                 with self.sync_lock:
                     self.performance_data['tcp']['failures']['transfers'] += 1
+
                 print(f"{self.RED}TCP transfer #{test_number} error: {error}{self.RESET}")
                 break
 
@@ -354,7 +356,6 @@ class Client:
 
                 except socket.timeout:
                     break
-
             # Calculate performance metrics
             test_duration = time.time() - test_start
 
@@ -376,6 +377,7 @@ class Client:
 
         except Exception as error:
             print(f"{self.RED}UDP transfer #{test_number} error: {error}{self.RESET}")
+
         finally:
             if udp_socket:
                 udp_socket.close()
