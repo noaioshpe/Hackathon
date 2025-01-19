@@ -72,7 +72,7 @@ class Client:
 
         while self.is_running:
             try:
-                self.file_size = self._get_file_size()
+                self.file_size = self.get_file_size()
                 self.state = ClientState.SERVER_DISCOVERY
                 self.initialize_udp_socket()
                 self.find_available_server()
@@ -82,7 +82,7 @@ class Client:
                 print(f"{self.RED}Error in main loop: {e}{self.RESET}")
                 time.sleep(1)
 
-        self._cleanup()
+        self.cleanup()
 
     def initialize_udp_socket(self):
         """Initialize and configure UDP socket for server discovery"""
@@ -108,7 +108,7 @@ class Client:
 
         while self.is_running and self.state == ClientState.SERVER_DISCOVERY:
             try:
-                socket_ready, _, _ = select.select([self.udp_socket], [], [], TIMEOUT_INTERVAL)
+                socket_ready, keep_1, keep_2 = select.select([self.udp_socket], [], [], TIMEOUT_INTERVAL)
 
                 if socket_ready:
                     server_message, server_address = self.udp_socket.recvfrom(1024)
@@ -134,7 +134,7 @@ class Client:
                 print(f"{self.RED}Error discovering server: {e}{self.RESET}")
                 time.sleep(1)
 
-    def _get_file_size(self):
+    def get_file_size(self):
         """Interactively prompt the user to specify a file size for speed testing with robust input validation"""
 
         while True:
@@ -219,7 +219,8 @@ class Client:
         test_end_time = time.time() + TEST_TIMEOUT
 
         for thread in tcp_test_threads + udp_test_threads:
-            remaining_time = max(0, test_end_time - time.time())
+            time_calc = test_end_time - time.time()
+            remaining_time = max(0, time_calc)
             thread.join(timeout=remaining_time)
 
         # Display results and reset state
@@ -285,7 +286,7 @@ class Client:
                     print(f"{self.GREEN}TCP transfer #{test_number} finished"
                           f" total time: {transfer_duration:.3f} seconds,"
                           f" total speed: {transfer_speed:.2f} bits/second {self.RESET}")
-#FIXME (maybe it should be in the line of the print)
+
                 break  # Success, exit retry loop
 
             except (ConnectionRefusedError, TimeoutError) as conn_error:
@@ -336,11 +337,11 @@ class Client:
 
             while (time.time() - last_packet) < SOCKET_TIMEOUT and self.is_running:
                 try:
-                    ready_sockets, _, _ = select.select([udp_socket], [], [], PACKET_TIMEOUT)
+                    ready_sockets, keep_space_1, keep_space_2 = select.select([udp_socket], [], [], PACKET_TIMEOUT)
                     if not ready_sockets:
                         continue
 
-                    packet_data, _ = udp_socket.recvfrom(PACKET_SIZE)
+                    packet_data, keepspace = udp_socket.recvfrom(PACKET_SIZE)
                     if len(packet_data) < HEADER_SIZE:
                         continue
 
@@ -445,7 +446,7 @@ class Client:
         print("\nShutting down client...")
         self.is_running = False
 
-    def _cleanup(self):
+    def cleanup(self):
         """Perform comprehensive resource management and graceful shutdown of network components"""
 
         try:

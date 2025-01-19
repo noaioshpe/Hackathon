@@ -1,11 +1,11 @@
-import socket
-import threading
 import struct
-import time
-import random
 import select
 import signal
-from typing import Tuple, List, Optional
+from typing import Tuple, Optional
+import socket
+import random
+import time
+import threading
 
 
 # ANSI color codes
@@ -54,63 +54,54 @@ class Server:
         self.data_udp_socket: Optional[socket.socket] = None
 
         # Set up signal handlers
-        self._setup_signal_handlers()
-
-    def _setup_signal_handlers(self) -> None:
-        """Configure system signal handlers for graceful shutdown."""
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
-
-    def _signal_handler(self, signum: int, frame) -> None:
-        """
-        Handle system signals for shutdown.
-        """
-        print(f"{Colors.YELLOW}Shutting down server...{Colors.RESET}")
-        self.stop_server()  # Stop the server
+        self.setup_signal_handlers()
 
     def start(self) -> None:
         """
         Start the server and initialize sockets and threads.
         """
-        self.is_active = True  # Set the running flag to True
+        # Set the running flag to True
+        self.is_active = True
 
         try:
-            self._initialize_sockets()
-            self._start_broadcast_thread()
-            self._print_server_info()
-            self._handle_requests()
+            self.initialize_sockets()
+            self.start_broadcast_thread()
+            self.print_server_info()
+            self.handle_requests()
 
         except Exception as e:
             print(f"{Colors.RED}Error starting server: {e}{Colors.RESET}")
-            self.stop_server()  # Stop the server on error
+            # Stop the server on error
+            self.stop_server()
 
-    def _initialize_sockets(self) -> None:
+    def initialize_sockets(self) -> None:
         """
         Initialize and bind the UDP and TCP sockets.
         """
-        self.udp_socket = self._create_udp_socket()
-        self.tcp_socket = self._create_tcp_socket()
+        self.udp_socket = self.create_udp_socket()
+        self.tcp_socket = self.create_tcp_socket()
 
-    def _create_udp_socket(self) -> socket.socket:
+    def create_udp_socket(self) -> socket.socket:
         udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp_socket.bind((self.server_host, self.data_udp_port))
         return udp_socket
 
-    def _create_tcp_socket(self) -> socket.socket:
+    def create_tcp_socket(self) -> socket.socket:
         tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         tcp_socket.bind((self.server_host, self.connection_tcp_port))
         tcp_socket.listen(5)
         return tcp_socket
 
-    def _start_broadcast_thread(self) -> None:
+    def start_broadcast_thread(self) -> None:
         """
         Start a thread to broadcast server offers.
         """
-        self.broadcast_thread = threading.Thread(target=self._broadcast_offer)
-        self.broadcast_thread.daemon = True  # Ensure thread exits with the program
+        self.broadcast_thread = threading.Thread(target=self.broadcast_offer)
+        # Ensure thread exits with the program
+        self.broadcast_thread.daemon = True
         self.broadcast_thread.start()
 
-    def _print_server_info(self) -> None:
+    def print_server_info(self) -> None:
         """
         Print the server's IP address and port information.
         """
@@ -118,13 +109,14 @@ class Server:
         print(f"{Colors.GREEN}Server started, listening on IP address {server_ip}{Colors.RESET}")
         print(f"{Colors.GREEN}Port: {self.data_udp_port}, TCP Port: {self.connection_tcp_port}{Colors.RESET}")
 
-    def _broadcast_offer(self):
+    def broadcast_offer(self):
         """
         Continuously broadcast server offer messages using non-blocking sockets.
         """
         try:
-            # Create a UDP socket for broadcasting
+            # Create a UDP socket for broadcasting server offers
             offer_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # Enable broadcasting capability for the socket
             offer_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
             # Prepare the offer message with server details
@@ -136,10 +128,11 @@ class Server:
 
             while self.is_active:
                 try:
-                    # Send the offer message as a broadcast
+                    # Send broadcast message to all potential clients on the discovery port
                     offer_socket.sendto(offer_message, ('<broadcast>', self.broadcast_port))
                     time.sleep(1)  # Wait before sending the next offer
                 except Exception as e:
+                    # Log any errors during broadcast transmission
                     print(f"{Colors.RED}Error broadcasting offer: {e}{Colors.RESET}")
 
         except Exception as e:
@@ -147,11 +140,11 @@ class Server:
         finally:
             offer_socket.close()  # Ensure the socket is closed
 
-    def _handle_requests(self):
+    def handle_requests(self):
         """
         Main loop for handling incoming client requests.
         """
-        # Set sockets to non-blocking mode
+        # Configure sockets for concurrent request handling
         self.udp_socket.setblocking(False)
         self.tcp_socket.setblocking(False)
 
@@ -168,28 +161,26 @@ class Server:
                 for active_socket in readable_sockets:
                     try:
                         if active_socket is self.udp_socket:
-                            # Handle UDP speed test requests in a separate thread
-                            self._process_udp_request(active_socket)
+                            # Process UDP speed test requests in a separate thread
+                            self.process_udp_request(active_socket)
 
                         elif active_socket is self.tcp_socket:
                             # Handle new TCP client connections in a separate thread
-                            self._process_tcp_connection(active_socket)
+                            self.process_tcp_connection(active_socket)
 
                     except Exception as socket_error:
+                        # Log any errors during socket request processing
                         print(f"{Colors.RED}Error processing socket request: {socket_error}{Colors.RESET}")
 
                 for problem_socket in exceptional_sockets:
-                    self._handle_socket_exception(problem_socket, monitored_sockets)
+                    self.handle_socket_exception(problem_socket, monitored_sockets)
 
             except Exception as main_loop_error:
                 print(f"{Colors.RED}Critical error in request handling loop: {main_loop_error}{Colors.RESET}")
 
-    def _process_udp_request(self, udp_socket):
+    def process_udp_request(self, udp_socket):
         """
         Process an incoming UDP speed test request.
-
-        Args:
-            udp_socket: The UDP socket to receive data from
         """
         try:
             # Receive UDP data
@@ -197,19 +188,16 @@ class Server:
 
             # Handle the UDP speed test in a separate thread
             threading.Thread(
-                target=self._handle_udp_speed_test,
+                target=self.handle_udp_speed_test,
                 args=(data, client_address)
             ).start()
 
         except Exception as udp_error:
             print(f"{Colors.RED}Error handling UDP request: {udp_error}{Colors.RESET}")
 
-    def _process_tcp_connection(self, tcp_socket):
+    def process_tcp_connection(self, tcp_socket):
         """
         Accept and process a new TCP client connection.
-
-        Args:
-            tcp_socket: The TCP listener socket
         """
         try:
             # Accept the incoming TCP connection
@@ -217,20 +205,16 @@ class Server:
 
             # Handle the TCP client in a separate thread
             threading.Thread(
-                target=self._handle_tcp_client,
+                target=self.handle_tcp_client,
                 args=(client_socket, client_address)
             ).start()
 
         except Exception as tcp_error:
             print(f"{Colors.RED}Error handling TCP connection: {tcp_error}{Colors.RESET}")
 
-    def _handle_socket_exception(self, problem_socket, monitored_sockets):
+    def handle_socket_exception(self, problem_socket, monitored_sockets):
         """
         Handle exceptional conditions for a problematic socket.
-
-        Args:
-            problem_socket: The socket experiencing an exceptional condition
-            monitored_sockets: List of currently monitored sockets
         """
         try:
             print(f"{Colors.RED}Exception condition on {problem_socket.getsockname()}{Colors.RESET}")
@@ -245,15 +229,12 @@ class Server:
         except Exception as cleanup_error:
             print(f"{Colors.RED}Error during socket exception handling: {cleanup_error}{Colors.RESET}")
 
-    def _handle_udp_speed_test(self, data, client_address):
+    def handle_udp_speed_test(self, data, client_address):
         """
         Handle a UDP speed test request from a client.
-        Args:
-            data: The data received from the client
-            addr: The client's address
         """
         try:
-            # Unpack the client's request
+            # Unpack the received UDP request message
             magic_cookie, msg_type, file_size = struct.unpack('!IbQ', data)
 
             # Validate the incoming request
@@ -265,12 +246,12 @@ class Server:
             # Log the received UDP test request
             print(f"{Colors.BLUE}UDP test request from {client_address}, size: {file_size} bytes{Colors.RESET}")
 
-            # Calculate the number of segments to send
+            # Determine optimal segment size for data transmission
             segment_size = 1024
-            total_segments = self._calculate_total_segments(file_size, segment_size)
+            total_segments = self.calculate_total_segments(file_size, segment_size)
 
             # Send segmented data to the client
-            self._send_segmented_data(
+            self.send_segmented_data(
                 file_size=file_size,
                 segment_size=segment_size,
                 total_segments=total_segments,
@@ -280,10 +261,10 @@ class Server:
         except Exception as processing_error:
             print(f"{Colors.RED}Error handling UDP request: {processing_error}{Colors.RESET}")
 
-    def _calculate_total_segments(self, file_size: int, segment_size: int) -> int:
+    def calculate_total_segments(self, file_size: int, segment_size: int) -> int:
         return (file_size + segment_size - 1) // segment_size
 
-    def _send_segmented_data(self, file_size: int, segment_size: int, total_segments: int,
+    def send_segmented_data(self, file_size: int, segment_size: int, total_segments: int,
                              client_address: Tuple[str, int]):
 
         for segment_index in range(total_segments):
@@ -304,25 +285,22 @@ class Server:
             # Send the segment to the client
             self.udp_socket.sendto(segment_header + payload, client_address)
 
-    def _handle_tcp_client(self, client_socket, client_address):
+    def handle_tcp_client(self, client_socket, client_address):
         """
         Handle a TCP speed test request from a client.
-        Args:
-            client_socket: The socket connected to the client
-            addr: The client's address
         """
         try:
             # Configure socket timeout to prevent indefinite blocking
             client_socket.settimeout(5.0)
 
             # Receive file size request from the client
-            requested_file_size = self._receive_file_size_request(client_socket)
+            requested_file_size = self.receive_file_size_request(client_socket)
 
             # Log the TCP test request details
             print(f"{Colors.BLUE}TCP test request from {client_address}, size: {requested_file_size} bytes{Colors.RESET}")
 
             # Send the requested amount of data
-            self._transmit_test_data(client_socket, requested_file_size)
+            self.transmit_test_data(client_socket, requested_file_size)
 
         except socket.timeout:
             print(f"{Colors.RED}TCP client connection timed out: {client_address}{Colors.RESET}")
@@ -330,9 +308,9 @@ class Server:
             print(f"{Colors.RED}Error handling TCP client: {connection_error}{Colors.RESET}")
         finally:
             # Ensure the socket is always closed, preventing resource leaks
-            self._close_client_socket(client_socket)
+            self.close_client_socket(client_socket)
 
-    def _receive_file_size_request(self, client_socket: socket.socket) -> int:
+    def receive_file_size_request(self, client_socket: socket.socket) -> int:
         try:
             # Receive raw data and decode
             raw_data = client_socket.recv(1024).decode().strip()
@@ -344,7 +322,7 @@ class Server:
             print(f"{Colors.RED}Invalid file size request: {raw_data}{Colors.RESET}")
             raise
 
-    def _transmit_test_data(self, client_socket: socket.socket, file_size: int) -> None:
+    def transmit_test_data(self, client_socket: socket.socket, file_size: int) -> None:
         # Generate payload of 'X' characters
         test_data = b'X' * file_size
         try:
@@ -354,11 +332,23 @@ class Server:
             print(f"{Colors.RED}Data transmission error: {transmission_error}{Colors.RESET}")
             raise
 
-    def _close_client_socket(self, client_socket: socket.socket) -> None:
+    def close_client_socket(self, client_socket: socket.socket) -> None:
         try:
             client_socket.close()
         except Exception as close_error:
             print(f"{Colors.RED}Error closing client socket: {close_error}{Colors.RESET}")
+
+    def setup_signal_handlers(self) -> None:
+        """Configure system signal handlers for graceful shutdown."""
+        signal.signal(signal.SIGINT, self.signal_handler)
+        signal.signal(signal.SIGTERM, self.signal_handler)
+
+    def signal_handler(self, signum: int, frame) -> None:
+        """
+        Handle system signals for shutdown.
+        """
+        print(f"{Colors.YELLOW}Shutting down server...{Colors.RESET}")
+        self.stop_server()  # Stop the server
 
     def stop_server(self):
         # Indicate that the server should stop running
@@ -366,15 +356,15 @@ class Server:
         # Perform resource cleanup
         try:
             # Close UDP socket safely
-            self._close_socket(self.udp_socket, 'UDP')
+            self.close_socket(self.udp_socket, 'UDP')
             # Close TCP socket safely
-            self._close_socket(self.tcp_socket, 'TCP')
+            self.close_socket(self.tcp_socket, 'TCP')
             # Additional optional cleanup can be added here
-            self._perform_additional_cleanup()
+            self.perform_additional_cleanup()
         except Exception as cleanup_error:
             print(f"{Colors.RED}Critical error during server shutdown: {cleanup_error}{Colors.RESET}")
 
-    def _close_socket(self, socket_to_close: Optional[socket.socket], socket_type: str) -> None:
+    def close_socket(self, socket_to_close: Optional[socket.socket], socket_type: str) -> None:
         if socket_to_close is not None:
             try:
                 socket_to_close.close()
@@ -382,7 +372,7 @@ class Server:
             except Exception as socket_close_error:
                 print(f"{Colors.RED}Error closing {socket_type} socket: {socket_close_error}{Colors.RESET}")
 
-    def _perform_additional_cleanup(self) -> None:
+    def perform_additional_cleanup(self) -> None:
         try:
             # Log successful server shutdown
             print(f"{Colors.YELLOW}Server shutdown process completed{Colors.RESET}")
@@ -392,8 +382,11 @@ class Server:
 
 
 if __name__ == "__main__":
-    server = Server()  # Create an instance of the server
+    # Create an instance of the server
+    server = Server()
     try:
-        server.start()  # Start the server
+        # Start the server
+        server.start()
     except KeyboardInterrupt:
-        server.stop_server()  # Stop the server on interruption
+        # Stop the server on interruption
+        server.stop_server()
