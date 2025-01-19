@@ -115,7 +115,7 @@ class Server:
         Print the server's IP address and port information.
         """
         server_ip = socket.gethostbyname(socket.gethostname())
-        print(f"{Colors.GREEN}Wonder Woman's - Server started, listening on IP address {server_ip}{Colors.RESET}")
+        print(f"{Colors.GREEN}Server started, listening on IP address {server_ip}{Colors.RESET}")
         print(f"{Colors.GREEN}Port: {self.data_udp_port}, TCP Port: {self.connection_tcp_port}{Colors.RESET}")
 
     def _broadcast_offer(self):
