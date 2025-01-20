@@ -85,54 +85,73 @@ class Client:
         self.cleanup()
 
     def initialize_udp_socket(self):
-        """Initialize and configure UDP socket for server discovery"""
-
         try:
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+            # More robust socket configuration
             self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)  # Enable broadcast
             self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8388608)  # 8MB receive buffer
-            self.udp_socket.bind(('', self.discovery_port))
+
+            # Bind to all interfaces and specific port
+            self.udp_socket.bind(('0.0.0.0', self.discovery_port))
             self.udp_socket.setblocking(False)
         except Exception as e:
             print(f"{self.RED}Error setting up UDP socket: {e}{self.RESET}")
             raise
 
     def find_available_server(self):
-        """Discover available speed test servers through UDP broadcast with robust timeout and error handling"""
-
         print(f"{self.YELLOW}Looking for speed test server...{self.RESET}")
 
+        TOTAL_DISCOVERY_TIME = 30  # Increased discovery window
         TIMEOUT_INTERVAL = 1.0
-        EXPECTED_MSG_SIZE = 9  # Magic(4) + Type(1) + UDP(2) + TCP(2)
+        EXPECTED_MSG_SIZE = 9
         SERVER_MSG_TYPE = 0x2
 
-        while self.is_running and self.state == ClientState.SERVER_DISCOVERY:
+        discovered_servers = []
+        start_time = time.time()
+
+        while (self.is_running and
+               self.state == ClientState.SERVER_DISCOVERY and
+               time.time() - start_time < TOTAL_DISCOVERY_TIME):
+
             try:
-                socket_ready, keep_1, keep_2 = select.select([self.udp_socket], [], [], TIMEOUT_INTERVAL)
+                socket_ready, _, _ = select.select([self.udp_socket], [], [], TIMEOUT_INTERVAL)
 
                 if socket_ready:
-                    server_message, server_address = self.udp_socket.recvfrom(1024)
+                    try:
+                        server_message, server_address = self.udp_socket.recvfrom(1024)
 
-                    if len(server_message) == EXPECTED_MSG_SIZE:
-                        # Unpack server broadcast message
-                        received_cookie, message_type, server_udp_port, server_tcp_port = \
-                            struct.unpack('!IbHH', server_message)
+                        if len(server_message) == EXPECTED_MSG_SIZE:
+                            received_cookie, message_type, server_udp_port, server_tcp_port = \
+                                struct.unpack('!IbHH', server_message)
 
-                        if received_cookie == self.protocol_cookie and message_type == SERVER_MSG_TYPE:
-                            print(f"{self.GREEN}Received offer from {server_address[0]}{self.RESET}")
+                            if (received_cookie == self.protocol_cookie and
+                                    message_type == SERVER_MSG_TYPE):
 
-                            self.state = ClientState.PERFORMANCE_TEST
+                                # Avoid duplicate server offers
+                                if server_address[0] not in [s[0] for s in discovered_servers]:
+                                    print(f"{self.GREEN}Received offer from {server_address[0]}{self.RESET}")
+                                    discovered_servers.append((server_address[0], server_udp_port, server_tcp_port))
 
-                            self.execute_performance_tests(
-                                server_host=server_address[0],
-                                udp_port=server_udp_port,
-                                tcp_port=server_tcp_port
-                            )
-                            break
+                    except Exception as parse_error:
+                        print(f"{self.RED}Error parsing server message: {parse_error}{self.RESET}")
 
             except Exception as e:
                 print(f"{self.RED}Error discovering server: {e}{self.RESET}")
-                time.sleep(1)
+                time.sleep(0.5)
+
+        # Choose the first discovered server or handle multiple servers
+        if discovered_servers:
+            server_host, udp_port, tcp_port = discovered_servers[0]
+            self.state = ClientState.PERFORMANCE_TEST
+            self.execute_performance_tests(
+                server_host=server_host,
+                udp_port=udp_port,
+                tcp_port=tcp_port
+            )
+        else:
+            print(f"{self.RED}No servers discovered within {TOTAL_DISCOVERY_TIME} seconds{self.RESET}")
 
     def get_file_size(self):
         """Interactively prompt the user to specify a file size for speed testing with robust input validation"""

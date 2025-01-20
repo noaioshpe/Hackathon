@@ -110,16 +110,17 @@ class Server:
         print(f"{Colors.GREEN}Port: {self.data_udp_port}, TCP Port: {self.connection_tcp_port}{Colors.RESET}")
 
     def broadcast_offer(self):
-        """
-        Continuously broadcast server offer messages using non-blocking sockets.
-        """
         try:
-            # Create a UDP socket for broadcasting server offers
             offer_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            # Enable broadcasting capability for the socket
             offer_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
-            # Prepare the offer message with server details
+            # Try multiple broadcast addresses
+            broadcast_addresses = [
+                '<broadcast>',
+                '255.255.255.255',
+                socket.gethostbyname(socket.gethostname())
+            ]
+
             offer_message = struct.pack('!IbHH',
                                         NetworkConstants.validator,
                                         NetworkConstants.massage_offer,
@@ -127,18 +128,17 @@ class Server:
                                         self.connection_tcp_port)
 
             while self.is_active:
-                try:
-                    # Send broadcast message to all potential clients on the discovery port
-                    offer_socket.sendto(offer_message, ('<broadcast>', self.broadcast_port))
-                    time.sleep(1)  # Wait before sending the next offer
-                except Exception as e:
-                    # Log any errors during broadcast transmission
-                    print(f"{Colors.RED}Error broadcasting offer: {e}{Colors.RESET}")
-
+                for addr in broadcast_addresses:
+                    try:
+                        offer_socket.sendto(offer_message, (addr, self.broadcast_port))
+                        print(f"Broadcasting to {addr}")
+                    except Exception as e:
+                        print(f"Broadcast error to {addr}: {e}")
+                time.sleep(1)
         except Exception as e:
-            print(f"{Colors.RED}Error in broadcast thread: {e}{Colors.RESET}")
+            print(f"Broadcast thread error: {e}")
         finally:
-            offer_socket.close()  # Ensure the socket is closed
+            offer_socket.close()
 
     def handle_requests(self):
         """
